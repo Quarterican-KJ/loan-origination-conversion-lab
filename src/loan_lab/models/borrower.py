@@ -10,6 +10,7 @@ from loan_lab.models.enums import BorrowerType
 
 if TYPE_CHECKING:
     from loan_lab.models.application import ApplicationParty, LoanApplication
+    from loan_lab.models.collateral import Collateral
 
 
 class Borrower(Base):
@@ -32,6 +33,9 @@ class Borrower(Base):
     parties: Mapped[list[ApplicationParty]] = relationship(back_populates="borrower")
     applications: Mapped[list[LoanApplication]] = relationship(
         secondary="application_party", viewonly=True, order_by="LoanApplication.id"
+    )
+    owned_collateral: Mapped[list[Collateral]] = relationship(
+        back_populates="owner", order_by="Collateral.id"
     )
 
     def __repr__(self) -> str:

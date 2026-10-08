@@ -12,6 +12,7 @@ from loan_lab.models.enums import ApplicationStatus, LoanProduct, PartyRole
 
 if TYPE_CHECKING:
     from loan_lab.models.borrower import Borrower
+    from loan_lab.models.collateral import Collateral, CollateralPledge
 
 
 class LoanApplication(Base):
@@ -44,6 +45,12 @@ class LoanApplication(Base):
     )
     borrowers: Mapped[list[Borrower]] = relationship(
         secondary="application_party", viewonly=True, order_by="Borrower.id"
+    )
+    collateral_pledges: Mapped[list[CollateralPledge]] = relationship(
+        back_populates="application", cascade="all, delete-orphan", passive_deletes=True
+    )
+    collateral: Mapped[list[Collateral]] = relationship(
+        secondary="collateral_pledge", viewonly=True, order_by="Collateral.id"
     )
 
     def __repr__(self) -> str:

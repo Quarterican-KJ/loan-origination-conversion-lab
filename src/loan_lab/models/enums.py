@@ -28,3 +28,21 @@ class PartyRole(StrEnum):
     PRIMARY_BORROWER = "primary_borrower"
     CO_BORROWER = "co_borrower"
     GUARANTOR = "guarantor"
+
+
+class CollateralType(StrEnum):
+    REAL_ESTATE = "real_estate"
+    EQUIPMENT = "equipment"
+    VEHICLE = "vehicle"
+    OTHER = "other"
+
+
+class PledgeStatus(StrEnum):
+    PROPOSED = "proposed"
+    ACTIVE = "active"
+    RELEASED = "released"
+
+
+class LienStatus(StrEnum):
+    ACTIVE = "active"
+    RELEASED = "released"

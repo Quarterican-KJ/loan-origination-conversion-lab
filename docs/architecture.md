@@ -67,12 +67,16 @@ Proves the conversion was complete and accurate by comparing source and target:
 
 ## LOS data model
 
-The initial model (`loan_lab.models`) has three tables:
+The model (`loan_lab.models`) has six tables: parties and applications, plus collateral.
 
 ```mermaid
 erDiagram
     BORROWER ||--o{ APPLICATION_PARTY : "participates as"
     LOAN_APPLICATION ||--o{ APPLICATION_PARTY : "has"
+    BORROWER |o--o{ COLLATERAL : "owns (optional)"
+    LOAN_APPLICATION ||--o{ COLLATERAL_PLEDGE : "secured by"
+    COLLATERAL ||--o{ COLLATERAL_PLEDGE : "pledged as"
+    COLLATERAL ||--o{ LIEN : "encumbered by"
     BORROWER {
         int id PK
         string source_system "nullable"
@@ -95,6 +99,31 @@ erDiagram
         int application_id FK
         int borrower_id FK
         string role "primary_borrower | co_borrower | guarantor"
+    }
+    COLLATERAL {
+        int id PK
+        string source_system "nullable"
+        string source_system_id "nullable"
+        string collateral_type "real_estate | equipment | vehicle | other"
+        string description
+        ExactDecimal appraised_value "15,2 nullable"
+        date valuation_date "nullable"
+        int owner_id FK "nullable"
+    }
+    COLLATERAL_PLEDGE {
+        int id PK
+        int application_id FK
+        int collateral_id FK
+        ExactDecimal pledged_amount "15,2 nullable"
+        string status "proposed | active | released"
+    }
+    LIEN {
+        int id PK
+        int collateral_id FK
+        string creditor_name
+        int priority
+        ExactDecimal outstanding_balance "15,2"
+        string status "active | released"
     }
 ```
 
@@ -124,7 +153,7 @@ erDiagram
    `source_system_id` is unique only together with its `source_system` (a unique constraint on the
    pair). The same identifier may appear in different source systems and refer to different people or
    entities. Both fields are optional (records created directly in the LOS have neither), but if one
-   is set the other must be too. `LoanApplication` follows the same rule.
+   is set the other must be too. `LoanApplication` and `Collateral` follow the same rule.
 
 5. **Loan products are placeholders.** The `LoanProduct` values (`consumer_auto`,
    `consumer_personal`, `residential_mortgage`, `home_equity`, `commercial_term`,
@@ -134,6 +163,63 @@ erDiagram
 6. **Synthetic schema.** These models were designed for this lab. They do not represent, derive
    from, or mirror any proprietary vendor, core-banking, or institution schema. All data used with
    them is synthetic.
+
+### Collateral assumptions and limitations
+
+1. **Collateral is independent of any one application.** A `Collateral` row describes an asset. It
+   is linked to applications through `CollateralPledge`, so one application can be secured by
+   several assets and the same asset can secure several applications. The database allows at most
+   one pledge row per application-collateral pair. Collateral that is still pledged cannot be
+   deleted. Deleting an application removes its pledges but keeps the collateral.
+
+2. **Pledged amount is optional and unvalidated against value.** `pledged_amount`, when present,
+   must be positive. It is **not** checked against `appraised_value`, the loan's `requested_amount`,
+   or other pledges of the same asset, so pledges across applications may add up to more than the
+   appraised value. Those are collateral policy rules and are not implemented.
+
+3. **Valuation may be missing; at most one appraisal per asset.** `appraised_value` and
+   `valuation_date` are both optional, independently of each other, so incomplete legacy collateral
+   records can be imported as-is. A missing value is stored as `NULL`. No default value or date is
+   ever filled in, and a missing appraisal must never be replaced with a placeholder such as `0` or
+   the import date. When `appraised_value` is provided, it must be positive. Only the current
+   valuation is kept. There is no valuation history, appraisal source, or staleness rule.
+   `valuation_date` is a calendar date with no time zone.
+
+   **A successful import does not mean a record is ready for underwriting.** The schema accepts
+   collateral without a valuation, and that collateral can already be pledged to an application.
+   Valuation requirements, such as requiring a current appraisal for certain collateral types or
+   before an application moves past a given status, will be enforced later by workflow validation
+   where applicable. Until then, code and reports must treat `NULL` as "unknown", not "zero". For
+   example, a total of appraised values over records with missing valuations is incomplete, not
+   lower.
+
+4. **Owner is an optional reference to `Borrower`.** The owner does not have to be a party on the
+   applications the asset secures (for example, a third-party pledgor). Joint or fractional ownership
+   is not modeled. A borrower who owns collateral cannot be deleted.
+
+5. **Lien priority is recorded data, not a computed legal ranking.** `priority` is the positive
+   position number reported by the source (1 = first). It is **not unique** per collateral, so two
+   liens may report the same position, and released liens keep their original number. The model does
+   not infer that a lien with a higher number is legally subordinate. Actual priority can depend on
+   recording dates, subordination agreements, and statutory liens such as taxes. `Collateral.liens`
+   is ordered by insertion (`id`), not by `priority`.
+
+6. **Lien balances are independent of loan amounts.** `outstanding_balance` (zero or more) is the
+   balance reported for that lien. It is not derived from, or required to match, any application's
+   `requested_amount`. A lien is not linked to a `LoanApplication`, including liens the lender itself
+   might hold.
+
+7. **Hard deletes are a prototype limitation.** Collateral and liens are physically deleted: deleting
+   a `Collateral` row also deletes its liens, and a `Lien` row can be deleted on its own. Nothing keeps
+   a deleted record, who deleted it, when, or why. Pledged collateral and borrowers who own
+   collateral are protected from deletion, but that is referential integrity, not an audit trail. A
+   production system needs audit and retention controls before collateral and lien data can be
+   relied on, for example soft deletes or status-based retirement, change history, and retention
+   rules. Until those exist, prefer marking records `released` over deleting them.
+
+8. **Out of scope:** loan-to-value (LTV) calculations, valuation policy and valuation-requirement
+   workflow, haircuts or advance rates, lien perfection or recording details, collateral status
+   workflows, and audit/retention controls.
 
 ## Exact decimal storage (`ExactDecimal`)
 
@@ -201,6 +287,7 @@ produces a float. Fetch the integer and convert in Python with
 
 ## Current status
 
-Implemented: the application skeleton, `GET /health`, and the initial LOS data model (`Borrower`,
-`LoanApplication`, `ApplicationParty`) with exact decimal storage. Not yet implemented: database
-migrations, workflow validation and status transitions, conversion stages, reconciliation, and UI.
+Implemented: the application skeleton, `GET /health`, and the LOS data model (`Borrower`,
+`LoanApplication`, `ApplicationParty`, `Collateral`, `CollateralPledge`, `Lien`) with exact decimal
+storage. Not yet implemented: database migrations, workflow validation and status transitions,
+collateral policy and LTV, conversion stages, reconciliation, and UI.
