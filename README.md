@@ -27,14 +27,15 @@ A Python learning lab that simulates two things found in banking technology:
 ├── data/                    # Local SQLite databases (git-ignored, created on demand)
 ├── src/
 │   └── loan_lab/
-│       ├── main.py          # FastAPI app (GET /health)
+│       ├── main.py          # FastAPI app factory (GET /health + web interface)
 │       ├── db.py            # SQLAlchemy engine setup (SQLite foreign keys on)
+│       ├── paths.py         # Project-root and default database path resolution
 │       ├── models/          # SQLAlchemy models: borrowers, applications, collateral, liens
 │       ├── synthetic/       # Deterministic synthetic data generator + seeding CLI
 │       ├── conversion/      # Legacy extract/transform/load (future)
 │       ├── validation/      # Data validation rules (future)
 │       ├── reconciliation/  # Source-to-target reconciliation (future)
-│       └── web/             # Jinja2 web views (future)
+│       └── web/             # Read-only LOS interface: routes, queries, templates, static CSS/JS
 └── tests/                   # pytest suite (in-memory / temporary databases only)
 ```
 
@@ -59,18 +60,39 @@ python -m pip install -e ".[dev]"
 Copy-Item .env.example .env
 ```
 
-## Run the app
+## Run the LOS interface
+
+The web interface reads the development database `data\loan_lab_dev.db`. Seed it first
+(see [Generate synthetic data](#generate-synthetic-data)), then start the server:
 
 ```powershell
-uvicorn loan_lab.main:app --reload
+python -m loan_lab.synthetic --preset demo   # only needed once
+python -m uvicorn loan_lab.main:app --reload
 ```
 
 Then open:
 
-- Health check: <http://127.0.0.1:8000/health> → `{"status":"ok"}`
-- Interactive API docs: <http://127.0.0.1:8000/docs>
+| Page | URL |
+| --- | --- |
+| Dashboard: counts, requested volume, product and status breakdowns | <http://127.0.0.1:8000/> |
+| Application directory: search, product/status filters, pagination | <http://127.0.0.1:8000/applications> |
+| Application detail: terms, parties, collateral, appraisals, liens | <http://127.0.0.1:8000/applications/1> |
+| Health check → `{"status":"ok"}` | <http://127.0.0.1:8000/health> |
+| Interactive API docs | <http://127.0.0.1:8000/docs> |
 
 Stop the server with `Ctrl+C`.
+
+Notes:
+
+- **Read-only.** The interface opens SQLite in read-only mode and only serves `GET` routes.
+  It never creates, seeds, or modifies the database; other methods return `405`. If the
+  database is missing or empty, pages show a `503` message with the seeding command.
+- **Search** matches any party's name on an application (borrower, co-borrower, or guarantor)
+  case-insensitively, or an application ID such as `42` or `#42`.
+- **Theme.** Dark by default; use the sun/moon button in the top bar to switch. The choice is
+  saved in the browser's local storage.
+- Collateral without an appraisal shows its value as **Unknown**, never `$0`.
+- No authentication, editing, workflow transitions, or conversion yet.
 
 ## Generate synthetic data
 
@@ -138,6 +160,7 @@ python -m pytest
 ## Status
 
 Implemented: the `GET /health` endpoint, the LOS data model (borrowers, applications, parties,
-collateral, pledges, liens), and the synthetic data generator. Not yet implemented: database
-migrations, workflow validation, conversion, reconciliation, and UI. See
+collateral, pledges, liens), the synthetic data generator, and a read-only LOS web interface.
+Not yet implemented: authentication, editing, database migrations, workflow validation,
+conversion, and reconciliation. See
 [docs/architecture.md](docs/architecture.md) for the design and its current limitations.

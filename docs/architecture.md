@@ -43,7 +43,8 @@ The system of record for loans after conversion. It will eventually support view
 - **FastAPI** exposes JSON endpoints. Currently only `GET /health` exists.
 - **SQLAlchemy 2.x** models (in `models/`) define the target schema stored in SQLite. See
   [LOS data model](#los-data-model) below.
-- **Jinja2** templates (in `web/`) will render simple server-side pages.
+- **Jinja2** templates (in `web/`) render a read-only interface. See
+  [Read-only web interface](#read-only-web-interface-loan_labweb) below.
 
 ### Conversion engine (`loan_lab.conversion`)
 
@@ -407,6 +408,59 @@ Both applications fall within their products' amount, rate, and term ranges. The
 The generator does not produce legacy conversion exports or intentionally corrupted records, and it
 does not implement conversion logic. Those will come with the conversion engine.
 
+## Read-only web interface (`loan_lab.web`)
+
+Server-rendered pages over the development database (`data/loan_lab_dev.db`):
+
+| Route | Page |
+| --- | --- |
+| `GET /` | Dashboard: application count, requested volume, average request, unvalued collateral, product and status breakdowns |
+| `GET /applications` | Directory with search (`q`), `product`, `status`, `page`, `page_size` |
+| `GET /applications/{id}` | Terms, parties and roles, pledged collateral, appraisal, owner, other applications sharing the collateral, liens |
+
+| Module | Responsibility |
+| --- | --- |
+| `database.py` | Read-only engine and per-request session |
+| `queries.py` | All SQL: aggregates, the directory page, and the eager-loaded detail graph |
+| `routes.py` | Input validation and template context |
+| `formatting.py` | Jinja filters for money, rates, dates, and labels |
+| `setup.py` | Wires routes, static files, and HTML error pages into the FastAPI app |
+
+### Read-only guarantees
+
+- The engine opens SQLite with a `file:…?mode=ro` URI and sets `PRAGMA query_only = ON`, so
+  writes fail at the driver level and a missing file is never created.
+- Only `GET` routes exist; other methods return `405`.
+- The app never seeds data. A missing or empty database returns a `503` page naming the seeding
+  command.
+
+### Query and input handling
+
+- **Fixed query counts.** Dashboard: 3 queries. Directory: 2 (count and page). Detail: 5,
+  whatever the number of parties, pledges, or liens. The detail query ends with
+  `raiseload("*")`, so an accidental lazy load raises an error instead of issuing extra SQL.
+- **Parameterized SQL only.** Search uses `ILIKE`-style matching with `autoescape=True`, so `%`
+  and `_` are matched literally. Search matches any party's name, or an application ID such as
+  `42` or `#42`.
+- **Validated inputs.** Product and status must be known enum values; page is 1–1,000,000;
+  page size is 10, 25, 50, or 100; search text is at most 100 printable characters. Anything
+  else returns a `400` page. A page beyond the last returns `404`.
+- **Escaping.** Jinja2 autoescaping is on for all templates; user-supplied and stored text is
+  never marked safe.
+- **Unknown values.** A missing appraisal shows as "Unknown", never `$0`. A missing pledged
+  amount shows as "Not specified".
+
+### Limitations
+
+- No authentication, editing, workflow transitions, or conversion views.
+- Offset pagination. Deep pages on very large datasets get slower, and there is no column
+  sorting.
+- SQLite's `LIKE` is case-insensitive for ASCII letters only.
+- No Content-Security-Policy or other security headers are set yet. Share bars use an inline
+  `style` custom property, so a strict CSP would need `style-src 'unsafe-inline'` or a
+  different approach.
+- Lien priority is displayed as recorded; it is not a computed legal ranking.
+
 ## Design principles
 
 - **Separation of concerns** — each stage is its own package and can be tested in isolation.
@@ -418,6 +472,7 @@ does not implement conversion logic. Those will come with the conversion engine.
 
 Implemented: the application skeleton, `GET /health`, and the LOS data model (`Borrower`,
 `LoanApplication`, `ApplicationParty`, `Collateral`, `CollateralPledge`, `Lien`) with exact decimal
-storage, plus the deterministic synthetic data generator (`loan_lab.synthetic`). Not yet
-implemented: database migrations, workflow validation and status transitions,
-collateral policy and LTV, conversion stages, reconciliation, and UI.
+storage, the deterministic synthetic data generator (`loan_lab.synthetic`), and a read-only
+web interface (`loan_lab.web`). Not yet implemented: authentication, editing, database
+migrations, workflow validation and status transitions, collateral policy and LTV, conversion
+stages, and reconciliation.

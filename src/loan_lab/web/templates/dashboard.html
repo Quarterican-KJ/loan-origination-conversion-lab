@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block breadcrumbs %}<span aria-current="page">Dashboard</span>{% endblock %}
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1>Portfolio dashboard</h1>
+    <p class="muted">Live summary of loan applications in the development database.</p>
+  </div>
+  <a class="button" href="{{ url_for('applications') }}">View applications</a>
+</div>
+
+<section class="kpis" aria-label="Key figures">
+  <div class="kpi">
+    <span class="kpi-label">Applications</span>
+    <span class="kpi-value" data-kpi="applications">{{ stats.application_count | number }}</span>
+  </div>
+  <div class="kpi">
+    <span class="kpi-label">Total requested volume</span>
+    <span class="kpi-value" data-kpi="volume" title="{{ stats.total_volume | money }}">{{ stats.total_volume | compact_money }}</span>
+    <span class="kpi-sub num">{{ stats.total_volume | money }}</span>
+  </div>
+  <div class="kpi">
+    <span class="kpi-label">Average request</span>
+    <span class="kpi-value" data-kpi="average">{{ stats.average_amount | money('—') }}</span>
+  </div>
+  <div class="kpi">
+    <span class="kpi-label">Collateral awaiting valuation</span>
+    <span class="kpi-value" data-kpi="unvalued">{{ stats.collateral_without_valuation | number }}</span>
+    <span class="kpi-sub">of {{ stats.collateral_count | number }} collateral items</span>
+  </div>
+</section>
+
+<div class="grid-2">
+  <section class="panel" aria-labelledby="by-product">
+    <header class="panel-header"><h2 id="by-product">Product distribution</h2></header>
+    <table class="table">
+      <thead>
+        <tr><th scope="col">Product</th><th scope="col" class="num">Applications</th><th scope="col">Share</th><th scope="col" class="num">Requested volume</th></tr>
+      </thead>
+      <tbody>
+        {% for item in stats.by_product %}
+        <tr data-product="{{ item.key.value }}">
+          <td><a href="{{ url_for('applications') }}?product={{ item.key.value | urlencode }}">{{ item.key | label }}</a></td>
+          <td class="num" data-field="count">{{ item.count | number }}</td>
+          <td><span class="bar" style="--share: {{ '%.2f' % (item.share * 100) }}%"><span class="bar-fill"></span></span><span class="bar-label">{{ item.share | percent }}</span></td>
+          <td class="num" data-field="volume">{{ item.volume | money }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+
+  <section class="panel" aria-labelledby="by-status">
+    <header class="panel-header"><h2 id="by-status">Status breakdown</h2></header>
+    <table class="table">
+      <thead>
+        <tr><th scope="col">Status</th><th scope="col" class="num">Applications</th><th scope="col">Share</th><th scope="col" class="num">Requested volume</th></tr>
+      </thead>
+      <tbody>
+        {% for item in stats.by_status %}
+        <tr data-status="{{ item.key.value }}">
+          <td><a href="{{ url_for('applications') }}?status={{ item.key.value | urlencode }}"><span class="badge status-{{ item.key.value }}">{{ item.key | label }}</span></a></td>
+          <td class="num" data-field="count">{{ item.count | number }}</td>
+          <td><span class="bar" style="--share: {{ '%.2f' % (item.share * 100) }}%"><span class="bar-fill"></span></span><span class="bar-label">{{ item.share | percent }}</span></td>
+          <td class="num" data-field="volume">{{ item.volume | money }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+</div>
+{% endblock %}

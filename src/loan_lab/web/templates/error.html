@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}{{ title }}{% endblock %}
+{% block breadcrumbs %}<a href="{{ url_for('dashboard') }}">Dashboard</a><span class="sep">/</span><span aria-current="page">{{ title }}</span>{% endblock %}
+{% block content %}
+<section class="panel error-panel" role="alert">
+  <h1>{{ title }}</h1>
+  <p>{{ message }}</p>
+  {% if hint %}<p class="hint"><code>{{ hint }}</code></p>{% endif %}
+  <p><a class="button button-ghost" href="{{ url_for('applications') }}">Application directory</a> <a class="button button-ghost" href="{{ url_for('dashboard') }}">Dashboard</a></p>
+</section>
+{% endblock %}

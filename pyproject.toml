@@ -24,6 +24,9 @@ dev = [
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+loan_lab = ["web/templates/*.html", "web/static/css/*.css", "web/static/js/*.js"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"

@@ -5,18 +5,15 @@ from __future__ import annotations
 import argparse
 import sys
 import time
-import tomllib
 from pathlib import Path
 
 from sqlalchemy import Engine, func, inspect, select
 
 from loan_lab.db import create_db_engine
 from loan_lab.models import Base
+from loan_lab.paths import DEFAULT_DATABASE_RELATIVE, PROJECT_NAME, find_project_root
 from loan_lab.synthetic.generator import DEFAULT_BATCH_SIZE, DEFAULT_SEED, PRESETS
 from loan_lab.synthetic.seeding import seed_database
-
-PROJECT_NAME = "loan-origination-conversion-lab"
-DEFAULT_DATABASE_RELATIVE = Path("data") / "loan_lab_dev.db"
 
 EXIT_OK = 0
 EXIT_REFUSED = 1
@@ -124,18 +121,6 @@ def main(argv: list[str] | None = None) -> int:
     for name, count in summary.items():
         print(f"  {LABELS[name]:<22}{count:>10,}")
     return EXIT_OK
-
-
-def find_project_root(start: Path) -> Path:
-    """Return the nearest ancestor of `start` whose pyproject.toml declares this project."""
-    for directory in start.resolve().parents:
-        pyproject = directory / "pyproject.toml"
-        if pyproject.is_file():
-            with pyproject.open("rb") as file:
-                name = tomllib.load(file).get("project", {}).get("name")
-            if name == PROJECT_NAME:
-                return directory
-    raise FileNotFoundError(f"Could not find the {PROJECT_NAME} project root above {start}.")
 
 
 def default_database_path() -> Path:

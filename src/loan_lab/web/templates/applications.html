@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+{% block title %}Applications{% endblock %}
+{% block breadcrumbs %}<a href="{{ url_for('dashboard') }}">Dashboard</a><span class="sep">/</span><span aria-current="page">Applications</span>{% endblock %}
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1>Application directory</h1>
+    <p class="muted" data-result-count="{{ result.total }}">
+      {% if result.total %}
+        Showing {{ result.first_index | number }}–{{ result.last_index | number }} of {{ result.total | number }} applications
+      {% else %}
+        No applications match the current filters
+      {% endif %}
+    </p>
+  </div>
+</div>
+
+<form class="filters" method="get" action="{{ url_for('applications') }}" data-auto-submit>
+  <div class="field field-grow">
+    <label for="q">Search</label>
+    <input id="q" type="search" name="q" value="{{ filters.q }}" maxlength="100" placeholder="Borrower, guarantor or application #">
+  </div>
+  <div class="field">
+    <label for="product">Product</label>
+    <select id="product" name="product">
+      <option value="">All products</option>
+      {% for option in PRODUCTS %}
+      <option value="{{ option.value }}" {% if filters.product == option %}selected{% endif %}>{{ option | label }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="field">
+    <label for="status">Status</label>
+    <select id="status" name="status">
+      <option value="">All statuses</option>
+      {% for option in STATUSES %}
+      <option value="{{ option.value }}" {% if filters.status == option %}selected{% endif %}>{{ option | label }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="field">
+    <label for="page_size">Rows</label>
+    <select id="page_size" name="page_size">
+      {% for size in page_sizes %}
+      <option value="{{ size }}" {% if filters.page_size == size %}selected{% endif %}>{{ size }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="field-actions">
+    <button class="button" type="submit">Apply</button>
+    <a class="button button-ghost" href="{{ url_for('applications') }}">Clear</a>
+  </div>
+</form>
+
+{% if result.out_of_range %}
+<div class="notice" role="status">
+  Page {{ result.page | number }} is beyond the last page ({{ result.page_count | number }}).
+  <a href="?{{ query_string(result.page_count) }}">Go to the last page</a>.
+</div>
+{% endif %}
+
+<section class="panel">
+  <div class="table-scroll">
+    <table class="table table-hover">
+      <thead>
+        <tr>
+          <th scope="col">ID</th>
+          <th scope="col">Primary borrower</th>
+          <th scope="col">Product</th>
+          <th scope="col" class="num">Requested amount</th>
+          <th scope="col" class="num">Rate</th>
+          <th scope="col" class="num">Term</th>
+          <th scope="col">Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in result.rows %}
+        <tr data-application-id="{{ row.id }}">
+          <td class="num-id"><a href="{{ url_for('application', application_id=row.id) }}">#{{ row.id }}</a></td>
+          <td><a href="{{ url_for('application', application_id=row.id) }}">{{ row.borrower_name or 'No primary borrower' }}</a></td>
+          <td>{{ row.loan_product | label }}</td>
+          <td class="num">{{ row.requested_amount | money }}</td>
+          <td class="num">{{ row.interest_rate | rate }}</td>
+          <td class="num">{{ row.term_months }} mo</td>
+          <td><span class="badge status-{{ row.status.value }}">{{ row.status | label }}</span></td>
+        </tr>
+        {% else %}
+        <tr><td colspan="7" class="empty">No applications found.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+{% if result.page_count > 1 %}
+<nav class="pagination" aria-label="Pagination">
+  {% if result.page > 1 and not result.out_of_range %}
+  <a class="page-link" rel="prev" href="?{{ query_string(result.page - 1) }}">Previous</a>
+  {% else %}
+  <span class="page-link disabled" aria-disabled="true">Previous</span>
+  {% endif %}
+  {% for number in page_links %}
+    {% if number is none %}
+  <span class="page-gap" aria-hidden="true">…</span>
+    {% elif number == result.page %}
+  <span class="page-link current" aria-current="page">{{ number | number }}</span>
+    {% else %}
+  <a class="page-link" href="?{{ query_string(number) }}">{{ number | number }}</a>
+    {% endif %}
+  {% endfor %}
+  {% if result.page < result.page_count %}
+  <a class="page-link" rel="next" href="?{{ query_string(result.page + 1) }}">Next</a>
+  {% else %}
+  <span class="page-link disabled" aria-disabled="true">Next</span>
+  {% endif %}
+</nav>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>{% block title %}{% endblock %} · {{ APP_NAME }}</title>
+  <script src="{{ url_for('static', path='js/theme.js') }}"></script>
+  <link rel="stylesheet" href="{{ url_for('static', path='css/app.css') }}">
+  <script src="{{ url_for('static', path='js/app.js') }}" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#content">Skip to content</a>
+  <div class="shell">
+    <aside class="sidebar" id="sidebar" aria-label="Primary">
+      <a class="brand" href="{{ url_for('dashboard') }}">
+        <span class="brand-mark" aria-hidden="true">LO</span>
+        <span class="brand-text">
+          <span class="brand-name">Loan Origination</span>
+          <span class="brand-sub">&amp; Conversion Lab</span>
+        </span>
+      </a>
+      <nav class="nav">
+        <span class="nav-heading">Origination</span>
+        <a class="nav-link" href="{{ url_for('dashboard') }}" {% if active == 'dashboard' %}aria-current="page"{% endif %}>
+          <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M3 3h6v8H3zM11 3h6v5h-6zM11 10h6v7h-6zM3 13h6v4H3z"/></svg>
+          Dashboard
+        </a>
+        <a class="nav-link" href="{{ url_for('applications') }}" {% if active == 'applications' %}aria-current="page"{% endif %}>
+          <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M3 4h14v2H3zM3 9h14v2H3zM3 14h14v2H3z"/></svg>
+          Applications
+        </a>
+      </nav>
+      <div class="sidebar-footer">
+        <span class="pill pill-muted">Synthetic data</span>
+        <span class="pill pill-muted">Read-only</span>
+      </div>
+    </aside>
+    <div class="sidebar-backdrop" data-sidebar-close hidden></div>
+
+    <div class="main">
+      <header class="topbar">
+        <button type="button" class="icon-button sidebar-toggle" data-sidebar-toggle aria-controls="sidebar" aria-expanded="false" aria-label="Open navigation">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5h14v2H3zM3 9h14v2H3zM3 13h14v2H3z"/></svg>
+        </button>
+        <nav class="breadcrumbs" aria-label="Breadcrumb">{% block breadcrumbs %}{% endblock %}</nav>
+        <form class="topbar-search" action="{{ url_for('applications') }}" method="get" role="search">
+          <label class="visually-hidden" for="global-search">Search applications</label>
+          <input id="global-search" type="search" name="q" maxlength="100" placeholder="Search borrower, party or application #" autocomplete="off">
+        </form>
+        <button type="button" class="icon-button" data-theme-toggle aria-label="Switch to light mode" title="Toggle light/dark mode">
+          <svg class="icon-sun" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="4"/><path d="M10 1v3M10 16v3M1 10h3M16 10h3M3.6 3.6l2.1 2.1M14.3 14.3l2.1 2.1M3.6 16.4l2.1-2.1M14.3 5.7l2.1-2.1" stroke-width="1.6" stroke="currentColor" fill="none"/></svg>
+          <svg class="icon-moon" viewBox="0 0 20 20" aria-hidden="true"><path d="M15.5 13.2A7 7 0 0 1 6.8 4.5a7 7 0 1 0 8.7 8.7z"/></svg>
+        </button>
+      </header>
+
+      <main class="content" id="content">
+        {% block content %}{% endblock %}
+      </main>
+    </div>
+  </div>
+</body>
+</html>

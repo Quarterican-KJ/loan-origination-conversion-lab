@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{% block title %}Application #{{ application.id }}{% endblock %}
+{% block breadcrumbs %}<a href="{{ url_for('dashboard') }}">Dashboard</a><span class="sep">/</span><a href="{{ url_for('applications') }}">Applications</a><span class="sep">/</span><span aria-current="page">#{{ application.id }}</span>{% endblock %}
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1>Application #{{ application.id }} <span class="badge status-{{ application.status.value }}">{{ application.status | label }}</span></h1>
+    <p class="muted">{{ application.loan_product | label }}</p>
+  </div>
+  <a class="button button-ghost" href="{{ url_for('applications') }}">Back to directory</a>
+</div>
+
+<section class="panel" aria-labelledby="terms">
+  <header class="panel-header"><h2 id="terms">Application terms</h2></header>
+  <dl class="facts">
+    <div><dt>Product</dt><dd>{{ application.loan_product | label }}</dd></div>
+    <div><dt>Requested amount</dt><dd class="num" data-field="requested-amount">{{ application.requested_amount | money }}</dd></div>
+    <div><dt>Interest rate</dt><dd class="num" data-field="interest-rate">{{ application.interest_rate | rate }}</dd></div>
+    <div><dt>Term</dt><dd class="num">{{ application.term_months | term }}</dd></div>
+    <div><dt>Status</dt><dd>{{ application.status | label }}</dd></div>
+    <div><dt>Source reference</dt><dd>{% if application.source_system %}{{ application.source_system }} / {{ application.source_system_id }}{% else %}<span class="muted">Created in LOS</span>{% endif %}</dd></div>
+  </dl>
+</section>
+
+<section class="panel" aria-labelledby="parties">
+  <header class="panel-header"><h2 id="parties">Parties <span class="count">{{ parties | length }}</span></h2></header>
+  <table class="table">
+    <thead><tr><th scope="col">Name</th><th scope="col">Type</th><th scope="col">Role</th><th scope="col">Borrower ID</th></tr></thead>
+    <tbody>
+      {% for party in parties %}
+      <tr data-party-role="{{ party.role.value }}">
+        <td>{{ party.borrower.legal_name }}</td>
+        <td>{{ party.borrower.borrower_type | label }}</td>
+        <td><span class="badge role-{{ party.role.value }}">{{ party.role | label }}</span></td>
+        <td class="num-id">{{ party.borrower_id }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="4" class="empty">No parties recorded.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="section" aria-labelledby="collateral">
+  <h2 class="section-title" id="collateral">Collateral <span class="count">{{ pledges | length }}</span></h2>
+  {% for pledge in pledges %}
+  {% set item = pledge.collateral %}
+  <article class="panel collateral" data-collateral-id="{{ item.id }}">
+    <header class="panel-header">
+      <div>
+        <h3>{{ item.description }}</h3>
+        <p class="muted">{{ item.collateral_type | label }} · Collateral #{{ item.id }}</p>
+      </div>
+      <span class="badge pledge-{{ pledge.status.value }}">Pledge {{ pledge.status | label | lower }}</span>
+    </header>
+    <dl class="facts">
+      <div>
+        <dt>Appraised value</dt>
+        <dd class="num" data-field="appraised-value">{% if item.appraised_value is none %}<span class="unknown">Unknown</span>{% else %}{{ item.appraised_value | money }}{% endif %}</dd>
+      </div>
+      <div>
+        <dt>Valuation date</dt>
+        <dd data-field="valuation-date">{% if item.valuation_date is none %}<span class="unknown">Unknown</span>{% else %}{{ item.valuation_date | iso_date }}{% endif %}</dd>
+      </div>
+      <div>
+        <dt>Pledged amount</dt>
+        <dd class="num" data-field="pledged-amount">{% if pledge.pledged_amount is none %}<span class="muted">Not specified</span>{% else %}{{ pledge.pledged_amount | money }}{% endif %}</dd>
+      </div>
+      <div>
+        <dt>Owner</dt>
+        <dd data-field="owner">
+          {% if item.owner is none %}<span class="muted">Not recorded</span>
+          {% else %}
+            {{ item.owner.legal_name }}
+            {% if item.owner_id in party_roles %}<span class="muted">({{ party_roles[item.owner_id] | label }})</span>
+            {% else %}<span class="muted">(not a party on this application)</span>{% endif %}
+          {% endif %}
+        </dd>
+      </div>
+      {% set others = item.pledges | rejectattr('application_id', 'equalto', application.id) | list %}
+      <div>
+        <dt>Also pledged to</dt>
+        <dd data-field="shared-with">
+          {% for other in others | sort(attribute='application_id') %}<a href="{{ url_for('application', application_id=other.application_id) }}">#{{ other.application_id }}</a>{% if not loop.last %}, {% endif %}{% else %}<span class="muted">No other applications</span>{% endfor %}
+        </dd>
+      </div>
+    </dl>
+    {% if item.appraised_value is none %}
+    <p class="notice notice-warning">No appraisal on record. The value is unknown, not zero.</p>
+    {% endif %}
+    <div class="subsection">
+      <h4>Liens <span class="count">{{ item.liens | length }}</span></h4>
+      {% if item.liens %}
+      <table class="table table-compact">
+        <thead><tr><th scope="col">Creditor</th><th scope="col" class="num">Recorded priority</th><th scope="col" class="num">Outstanding balance</th><th scope="col">Status</th></tr></thead>
+        <tbody>
+          {% for lien in item.liens %}
+          <tr data-lien-id="{{ lien.id }}">
+            <td>{{ lien.creditor_name }}</td>
+            <td class="num">{{ lien.priority }}</td>
+            <td class="num">{{ lien.outstanding_balance | money }}</td>
+            <td><span class="badge lien-{{ lien.status.value }}">{{ lien.status | label }}</span></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      <p class="footnote">Priority is shown as recorded by the source. It is not a computed legal ranking.</p>
+      {% else %}
+      <p class="muted">No liens recorded.</p>
+      {% endif %}
+    </div>
+  </article>
+  {% else %}
+  <div class="panel"><p class="empty">No collateral pledged to this application.</p></div>
+  {% endfor %}
+</section>
+{% endblock %}
