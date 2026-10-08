@@ -278,6 +278,135 @@ Avoid dividing in SQL (`requested_amount / 100.0`) for anything that is reconcil
 produces a float. Fetch the integer and convert in Python with
 `Decimal(raw).scaleb(-scale)`, or let SQLAlchemy do it by selecting the typed column.
 
+## Synthetic data generator (`loan_lab.synthetic`)
+
+A development-only tool that fills a SQLite database with fictional LOS data. It is separate from
+the FastAPI app: `loan_lab.main` does not import it, and nothing is seeded on startup.
+
+```mermaid
+flowchart LR
+    CLI["CLI<br/>python -m loan_lab.synthetic"] --> Guard{"Safety checks"}
+    Guard -->|"empty or new DB"| Seed["seed_database()"]
+    Guard -->|"populated, --reset +<br/>confirmed file name"| Drop["drop LOS tables"] --> Seed
+    Guard -->|"populated without --reset,<br/>unconfirmed, or foreign tables"| Refuse["exit 1, no changes"]
+    Gen["SyntheticDataGenerator<br/>(seeded random.Random)"] -->|"batches of ≤ N applications"| Seed
+    Seed -->|"Core executemany,<br/>one transaction"| DB[("data/loan_lab_dev.db")]
+    Seed --> Summary["counts read back<br/>from the database"]
+```
+
+| Module | Responsibility |
+| --- | --- |
+| `generator.py` | Builds rows as plain dicts, one application at a time, grouped into `Batch` objects. Has no database access. |
+| `seeding.py` | Creates tables, refuses non-empty LOS tables, inserts batches in foreign-key order inside one transaction, and returns counts. |
+| `cli.py` | Parses presets and options, checks the target database, handles reset confirmation, and prints the summary. |
+
+### Commands (Windows PowerShell)
+
+```powershell
+python -m loan_lab.synthetic --preset small     # 25 applications
+python -m loan_lab.synthetic --preset demo      # 5,000 applications
+python -m loan_lab.synthetic --preset stress    # 100,000 applications
+python -m loan_lab.synthetic --preset demo --reset                              # prompts for file name
+python -m loan_lab.synthetic --preset demo --reset --confirm-reset loan_lab_dev.db  # non-interactive
+python -m loan_lab.synthetic --preset small --database data\scratch.db --seed 42 --batch-size 500
+```
+
+### Determinism
+
+- One `random.Random(seed)` drives every choice (default seed `20261008`), and rows are generated in
+  a fixed order. Dates are relative to a fixed `AS_OF_DATE` (2026-09-30), never today's date.
+- Row IDs are assigned by the generator starting at 1. That is why seeding requires empty tables.
+- Batch size changes only how rows are grouped, not the rows themselves. A smaller preset is the
+  first N applications of a larger run with the same seed.
+- Money and rates are built with integer arithmetic and `Decimal`. No floats are involved.
+- Results are reproducible on the same Python version. Python only guarantees `random`
+  sequences for a given version, so a major Python upgrade could change the generated data.
+
+### Memory and batching
+
+The generator is lazy. It yields at most `--batch-size` applications (default 1,000) at a time,
+together with their new borrowers, parties, collateral, pledges, and liens. The only state carried
+between batches is two bounded pools (250 recent individuals and 250 recent businesses, each business
+tracking at most 5 collateral IDs) that let later applications reuse earlier borrowers and collateral.
+Memory use therefore does not grow with the preset size.
+
+All batches are inserted in a **single transaction**, so a failed run leaves the LOS tables empty
+(rerunnable without `--reset`) rather than partially seeded.
+
+### Safety
+
+- The default target is the dedicated development file `data/loan_lab_dev.db` **under the project
+  root**, whichever directory the command is run from. The project root is the nearest folder above
+  the installed `loan_lab` package whose `pyproject.toml` is named `loan-origination-conversion-lab`.
+  With the editable install, that is the repository folder. If no such folder exists (for example a
+  non-editable install), the CLI stops and asks for `--database`. `data/` is git-ignored. Tests
+  only use in-memory databases or pytest temporary directories.
+- An explicit `--database` path is used as given. Relative paths are resolved against the current
+  working directory, like any other command-line path.
+- A database with any LOS rows is refused unless `--reset` is passed. A reset then needs a second
+  confirmation: typing the database file name at the prompt, or `--confirm-reset <file name>`.
+  Without a terminal and without `--confirm-reset`, the reset is refused.
+- A reset drops and recreates only the LOS tables. A database containing tables that loan_lab does
+  not manage is refused even with `--reset`.
+- The printed summary is read back from the database after commit, not counted during generation.
+
+### What gets generated
+
+| Product | Amount range (step) | Terms (months) | Rate range | Parties | Collateral and prior liens |
+| --- | --- | --- | --- | --- | --- |
+| Consumer auto | $8,000–$75,000 ($100) | 36, 48, 60, 72 | 4.500–11.875% | Individual, 35% with co-borrower | Vehicle |
+| Consumer personal | $2,000–$40,000 ($100) | 12–60 | 8.000–19.875% | Individual, 35% with co-borrower | None (unsecured) |
+| Residential mortgage | $120,000–$1,200,000 ($1,000) | 180, 240, 360 | 5.250–7.750% | Individual, 35% with co-borrower | Residence. 30% have a prior first lien (refinance). |
+| Home equity | $15,000–$250,000 ($500) | 60, 120, 180, 240 | 6.500–10.500% | Individual, 35% with co-borrower | Residence with a prior first mortgage. 15% also have a second lien, active or released. |
+| Commercial term | $50,000–$2,000,000 ($1,000) | 36, 60, 84, 120 | 6.750–10.250% | Business, 0–2 individual guarantors | Equipment. 10% have a prior lien. |
+| Commercial real estate | $250,000–$5,000,000 ($5,000) | 60–300 | 6.250–9.000% | Business, 0–2 individual guarantors | Commercial property. 25% have a prior first lien. |
+
+- Rates are multiples of 0.125 percentage points. Application statuses follow a fixed distribution.
+  Pledge status follows the application status: approved → `active`, declined or withdrawn →
+  `released`, and anything else → `proposed`.
+- About 8% of individuals and 20% of businesses are reused from earlier applications. A reused business
+  pledges one of its existing collateral items to the new application 40% of the time, which creates
+  shared collateral.
+- **Collateral ownership:** new collateral is normally owned by the application's primary borrower.
+  When the application also has a guarantor or co-borrower, 10% of the time one of them owns the
+  collateral instead. This happens for about 5% of all collateral (206 of 4,249 items in the demo
+  preset). The owner is therefore always a party on the application. Collateral owned by a
+  guarantor or co-borrower is pledged only to that one application. Only business-owned
+  collateral is reused for the business's later applications, so an owner is a party on every
+  application its collateral secures. No unrelated third-party owners are generated.
+- Appraised values are whole dollars derived from the requested amount. Prior lien balances include
+  cents and stay below the collateral value. They are generated independently of the requested loan
+  amount.
+- **Missing valuations:** for applications in `draft` or `submitted` status, 40% of new collateral has
+  a pending appraisal. Both `appraised_value` and `valuation_date` are left `NULL`, and the pledge
+  gets no `pledged_amount`. No substitute value or date is ever generated.
+- Source-system reference columns are left `NULL` because these records are treated as created
+  directly in the LOS.
+- Names, addresses, and creditors come from fictional word lists. Creditor names include "Example".
+
+### Oak Ridge scenario
+
+The first two applications in every run are a fixed reference scenario. It uses no random numbers,
+so it is identical for every seed, and it always has IDs 1 and 2:
+
+| Item | Details |
+| --- | --- |
+| Borrower | Oak Ridge Properties LLC (business), primary borrower on both applications |
+| Guarantor | Dana R. Whitfield (individual), guarantor on both applications |
+| Application 1 | Commercial real estate, $500,000.00 at 6.8750% for 120 months, `in_review` |
+| Application 2 | Commercial term (equipment), $75,000.00 at 7.5000% for 84 months, `submitted` |
+| Shared collateral | Office building at 410 Oak Ridge Parkway, owned by Oak Ridge, valued at $725,000.00 on 2026-05-14. Pledged to application 1 ($500,000.00) and application 2 (no amount). |
+| Equipment collateral | HVAC and building-systems package, owned by Oak Ridge, valued at $150,000.00 on 2026-06-02. Pledged to application 2 ($75,000.00). |
+| Existing lien | Harbor Example Savings Bank, priority 1, $200,000.00 outstanding, active, on the office building |
+
+Both applications fall within their products' amount, rate, and term ranges. The existing lien
+($200,000) is independent of either loan amount.
+
+### Not included
+
+The generator does not produce legacy conversion exports or intentionally corrupted records, and it
+does not implement conversion logic. Those will come with the conversion engine.
+
 ## Design principles
 
 - **Separation of concerns** — each stage is its own package and can be tested in isolation.
@@ -289,5 +418,6 @@ produces a float. Fetch the integer and convert in Python with
 
 Implemented: the application skeleton, `GET /health`, and the LOS data model (`Borrower`,
 `LoanApplication`, `ApplicationParty`, `Collateral`, `CollateralPledge`, `Lien`) with exact decimal
-storage. Not yet implemented: database migrations, workflow validation and status transitions,
+storage, plus the deterministic synthetic data generator (`loan_lab.synthetic`). Not yet
+implemented: database migrations, workflow validation and status transitions,
 collateral policy and LTV, conversion stages, reconciliation, and UI.

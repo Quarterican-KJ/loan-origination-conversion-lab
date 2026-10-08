@@ -24,16 +24,18 @@ A Python learning lab that simulates two things found in banking technology:
 ├── docs/
 │   ├── architecture.md      # System design: mock LOS + conversion engine
 │   └── learning-log.md      # Notes on Python and loan origination concepts
+├── data/                    # Local SQLite databases (git-ignored, created on demand)
 ├── src/
 │   └── loan_lab/
 │       ├── main.py          # FastAPI app (GET /health)
-│       ├── models/          # SQLAlchemy models (future)
+│       ├── db.py            # SQLAlchemy engine setup (SQLite foreign keys on)
+│       ├── models/          # SQLAlchemy models: borrowers, applications, collateral, liens
+│       ├── synthetic/       # Deterministic synthetic data generator + seeding CLI
 │       ├── conversion/      # Legacy extract/transform/load (future)
 │       ├── validation/      # Data validation rules (future)
 │       ├── reconciliation/  # Source-to-target reconciliation (future)
 │       └── web/             # Jinja2 web views (future)
-└── tests/
-    └── test_health.py       # Health endpoint test
+└── tests/                   # pytest suite (in-memory / temporary databases only)
 ```
 
 ## Setup (Windows PowerShell)
@@ -70,6 +72,63 @@ Then open:
 
 Stop the server with `Ctrl+C`.
 
+## Generate synthetic data
+
+The generator fills a dedicated SQLite development database, `data\loan_lab_dev.db` in the
+project root, with fictional borrowers, applications, parties, collateral, pledges, and liens.
+The default location is the same whichever folder you run the command from. It never runs on
+application startup and never touches the test suite's databases.
+
+| Preset | Loan applications | Typical time |
+| --- | --- | --- |
+| `small` | 25 | under 1 second |
+| `demo` | 5,000 | about 1 second |
+| `stress` | 100,000 | not yet measured |
+
+```powershell
+# Seed a fresh development database (creates data\loan_lab_dev.db)
+python -m loan_lab.synthetic --preset small
+
+# Larger datasets
+python -m loan_lab.synthetic --preset demo
+python -m loan_lab.synthetic --preset stress
+
+# Use a different database file or seed. An explicit --database path is used as given;
+# relative paths are relative to the current folder.
+python -m loan_lab.synthetic --preset small --database data\scratch.db --seed 42
+
+# Show all options
+python -m loan_lab.synthetic --help
+```
+
+The same preset and seed always produce the same data. Every run prints counts for each entity
+type, read back from the database.
+
+### Reseeding an existing database
+
+The generator refuses to write to a database that already contains LOS data. To replace it,
+pass `--reset`. You then have to confirm a second time by typing the database file name:
+
+```powershell
+python -m loan_lab.synthetic --preset demo --reset
+# This permanently deletes 28,941 LOS rows from ...\data\loan_lab_dev.db.
+# Type the database file name (loan_lab_dev.db) to confirm: loan_lab_dev.db
+```
+
+For scripts or other non-interactive use, pass the confirmation explicitly:
+
+```powershell
+python -m loan_lab.synthetic --preset demo --reset --confirm-reset loan_lab_dev.db
+```
+
+Without a matching confirmation nothing is changed. The generator also refuses any database that
+contains tables it does not manage. To start over completely, delete the file from the
+repository root:
+
+```powershell
+Remove-Item data\loan_lab_dev.db
+```
+
 ## Run the tests
 
 ```powershell
@@ -78,4 +137,7 @@ python -m pytest
 
 ## Status
 
-Scaffold only. Loan business logic, database tables, and UI have not been implemented yet. See [docs/architecture.md](docs/architecture.md) for the planned design.
+Implemented: the `GET /health` endpoint, the LOS data model (borrowers, applications, parties,
+collateral, pledges, liens), and the synthetic data generator. Not yet implemented: database
+migrations, workflow validation, conversion, reconciliation, and UI. See
+[docs/architecture.md](docs/architecture.md) for the design and its current limitations.
