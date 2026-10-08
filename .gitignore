@@ -218,3 +218,20 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# --- Project-specific ---
+# Local SQLite databases and generated data (synthetic only, regenerate as needed)
+*.db
+*.sqlite
+*.sqlite3
+data/
+output/
+
+# Keep the env template tracked
+!.env.example
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
