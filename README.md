@@ -35,6 +35,7 @@ A Python learning lab that simulates two things found in banking technology:
 │       ├── models/          # SQLAlchemy models: borrowers, applications, collateral, liens
 │       ├── synthetic/       # Deterministic synthetic data generator + seeding CLI
 │       ├── conversion/      # Legacy CSV conversion: validate, map, load, and reconcile
+│       ├── scenarios/       # Synthetic, demo-only conversion failure scenarios
 │       ├── validation/      # Data validation rules (future)
 │       ├── reconciliation/  # Source-to-target reconciliation (future)
 │       └── web/             # Read-only LOS interface: routes, queries, templates, static CSS/JS
@@ -217,6 +218,49 @@ then close the run with `fail_run`. `verify_reconciliation` re-checks a `RECONCI
 evidence later. The recovery procedure and the remaining independence limits are in spec
 section 12 and [docs/architecture.md](docs/architecture.md).
 
+## Demonstrate conversion failures (synthetic, demo only)
+
+Three repeatable scenarios run the real conversion pipeline on the synthetic sample extract and
+show how each kind of failure is caught. Each run gets a new, labeled run ID and its own
+evidence, so you can run them again at any time.
+
+```powershell
+python -m loan_lab.scenarios all              # or one of the scenarios below
+python -m loan_lab.scenarios loader-defect
+```
+
+| Scenario | Run ID prefix | What it does | Expected outcome |
+| --- | --- | --- | --- |
+| `control-totals` | `SYN-CTRL-` | Copies the sample extract, then misstates the applications row of `extract_control.csv`: `RECORD_COUNT` 13 → 14 and `AMOUNT_TOTAL` 5467000.00 → 5476000.00 | `FAILED` at validation with RUN-04 and RUN-05. All four source files are archived with matching checksums. No target database or load report exists. |
+| `business-rejections` | `SYN-REJ-` | Converts the sample extract unchanged. Among other rejections, `0000500107` has an invalid amount (MP-02), `0000500113` has no primary borrower (RF-06), and a party row references a missing application (RF-01). | Rows (read / loaded / excluded / rejected): borrowers 16/11/1/4, applications 13/6/2/5, parties 20/10/3/7. REQ_AMT loaded 2,281,000.00, excluded 291,000.00, rejected 2,895,000.00. Then `RECONCILED`, with all ten RC rules passing. |
+| `loader-defect` | `SYN-DEFECT-` | Plans the sample extract normally, then changes the interest rate of the first eligible application (`0000500101`) from 6.5000 to 6.6000 in the load input. The transactional loader writes it, and the database checksum is recorded afterwards. | Loaded counts (11 / 6 / 10) and requested dollars (2,281,000.00) are unchanged. Reconciliation then reports one RC-07 discrepancy (`interest_rate` expected 6.5000, actual 6.6000) and marks the run `FAILED`. |
+
+The command checks each run's evidence against these expectations and prints what it found. It
+exits 0 when every scenario behaved as expected, 1 if any did not, and 3 if a run ID was refused
+(wrong prefix or already used). Use `--run-id SYN-DEFECT-my-demo` to choose an ID for a single
+scenario. `--evidence-root`, `--conversion-root`, and `--scenario-root` work as for the
+conversion command.
+
+To inspect a scenario, start the web interface and open `/conversions`. The runs appear
+alongside any others. The pages read each run's actual evidence:
+- `/conversions/<run_id>` shows the RUN-04 and RUN-05 issues for `control-totals`, and the
+  rejections and exclusions for `business-rejections`.
+- `/conversions/<run_id>/reconciliation` shows the RC-07 discrepancy for `loader-defect`.
+
+The files are in `output\conversion\<run_id>\` (evidence), `data\conversion\<run_id>\`
+(database), and `data\scenarios\<run_id>\`. That last folder holds `scenario.json` and, for
+`control-totals`, the altered extract. `scenario.json` labels the run as synthetic and
+demo-only and records exactly what was altered. All three locations are git-ignored. Delete a
+scenario's three folders by hand when you no longer need it.
+
+Safeguards:
+- Defect injection exists only in `loan_lab.scenarios`. The conversion and reconciliation
+  commands have no such option, and nothing in `loan_lab.conversion` imports the scenarios.
+- The conversion rules, loader, and evidence code are not modified.
+- Run IDs must carry the scenario's prefix, and an ID already used by any run is refused before
+  anything is written.
+- `DEMO-001`, `data\loan_lab_dev.db`, and `sample_data\legacy` are never written.
+
 ## Run the tests
 
 ```powershell
@@ -228,6 +272,11 @@ python -m pytest
 Implemented: the `GET /health` endpoint, the LOS data model (borrowers, applications, parties,
 collateral, pledges, liens), the synthetic data generator, a read-only LOS web interface with
 read-only Conversion Management pages, and legacy conversion validation, mapping, transactional
-loading with per-run evidence, and independent reconciliation. Not yet implemented: authentication, editing, database migrations,
+loading with per-run evidence, independent reconciliation, and synthetic conversion failure
+scenarios. Not yet implemented: authentication, editing, database migrations,
 workflow validation, and release approval. See
 [docs/architecture.md](docs/architecture.md) for the design and its current limitations.
+
+Known issues and planned work are tracked in [docs/backlog.md](docs/backlog.md). Log an issue
+when you find it, classify it as P1, P2, or P3, and define its acceptance criteria. Resolve P1
+issues before publishing, and update an issue's status once its fix is tested and committed.

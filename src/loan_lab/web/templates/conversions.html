@@ -32,7 +32,7 @@
 {% endif %}
 
 <section class="panel">
-  <div class="table-scroll">
+  {% call c.scroll("Conversion runs") %}
     <table class="table table-hover">
       <thead>
         <tr>
@@ -50,13 +50,14 @@
       <tbody>
         {% for run in listing.runs %}
         <tr data-run-id="{{ run.run_id }}">
-          <td><a href="{{ url_for('conversion', run_id=run.run_id) }}"><code class="run-id">{{ run.run_id }}</code></a></td>
+          <td><a href="{{ url_for('conversion', run_id=run.run_id) }}">{{ c.run_id(run.run_id) }}</a></td>
           <td>{{ c.status_badge(run) }}</td>
-          <td>{{ c.condition_badge(run) }}</td>
-          <td class="num" data-field="source-rows">{% for file in CONVERSION_DATA_FILES %}{{ c.count(run.rows[file].read if run.rows else none) }}{% if not loop.last %} / {% endif %}{% endfor %}</td>
+          <td class="wrap-tight">{{ c.condition_badge(run) }}</td>
+          {% set source_reads = run.rows.values() | map(attribute="read") | reject("none") | list if run.rows else [] %}
+          <td class="num" data-field="source-rows">{% if not source_reads %}{{ c.na() }}{% else %}{% for file in CONVERSION_DATA_FILES %}{{ c.count(run.rows[file].read) }}{% if not loop.last %} / {% endif %}{% endfor %}{% endif %}</td>
           <td class="num" data-field="target-rows">{% if run.loaded_target is none %}{{ c.na() }}{% else %}{{ c.count(run.loaded_target.borrowers) }} / {{ c.count(run.loaded_target.applications) }} / {{ c.count(run.loaded_target.parties) }}{% endif %}</td>
           <td class="num" data-field="loaded-volume">{{ c.amount(run.loaded_target.requested_amount if run.loaded_target else none) }}</td>
-          <td data-field="reconciliation">{% if run.reconciliation is none %}{{ c.na() }}{% else %}{{ run.reconciliation.outcome }}{% endif %}</td>
+          <td class="wrap-tight" data-field="reconciliation">{% if run.reconciliation is none %}{{ c.na() }}{% else %}{{ run.reconciliation.outcome }}{% endif %}</td>
           <td data-field="started">{{ c.timestamp(run.started_at) }}</td>
           <td data-field="finished">{{ c.timestamp(run.finished_at) }}</td>
         </tr>
@@ -65,7 +66,7 @@
         {% endfor %}
       </tbody>
     </table>
-  </div>
+  {% endcall %}
   {{ c.definitions(["read-back"]) }}
 </section>
 <p class="footnote">Source rows come from the manifest's validation summary; target rows and loaded volume are the values read back from the database by the loader and recorded in <code>reports/load_result.json</code>. The web interface never opens a conversion database. Archived source files are re-hashed on each run's summary page, not in this list.</p>

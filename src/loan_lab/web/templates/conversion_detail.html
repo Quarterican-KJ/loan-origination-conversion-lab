@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% import "_conversion.html" as c with context %}
 {% block title %}Run {{ run.run_id }}{% endblock %}
-{% block breadcrumbs %}<a href="{{ url_for('dashboard') }}">Dashboard</a><span class="sep">/</span><a href="{{ url_for('conversions') }}">Conversions</a><span class="sep">/</span><span aria-current="page">{{ run.run_id }}</span>{% endblock %}
+{% block breadcrumbs %}<a href="{{ url_for('dashboard') }}">Dashboard</a><span class="sep">/</span><a href="{{ url_for('conversions') }}">Conversions</a><span class="sep">/</span><span aria-current="page">{{ c.run_id(run.run_id) }}</span>{% endblock %}
 {% block content %}
 {{ c.run_header(run, "summary") }}
 
@@ -52,7 +52,7 @@
     <h2 id="sources">Source files</h2>
     <span class="muted">Recorded verification: {{ c.flag(run.source_verified, "Verified", "Not verified") }}</span>
   </header>
-  <div class="table-scroll">
+  {% call c.scroll("Source files") %}
     <table class="table table-compact">
       <thead><tr><th scope="col">File</th><th scope="col" class="num">Bytes</th><th scope="col">Planned SHA-256</th><th scope="col">Archived SHA-256</th><th scope="col">Recorded</th><th scope="col">Archived copy now</th></tr></thead>
       <tbody>
@@ -77,7 +77,7 @@
         {% endfor %}
       </tbody>
     </table>
-  </div>
+  {% endcall %}
   <p class="footnote panel-footnote">Archived copies are re-hashed on each view (files over the size limit are not). The conversion database is never opened by this interface; its checksum is shown as recorded. To re-check the database too, use <code>verify_reconciliation</code>.</p>
 </section>
 
@@ -89,6 +89,7 @@
   {% if run.issues %}
   <div class="subsection" data-section="issues">
     <h4>Run-level issues <span class="count">{{ run.issues_total | number }}</span></h4>
+    {% call c.scroll("Run-level issues") %}
     <table class="table table-compact">
       <thead><tr><th scope="col">Rule</th><th scope="col">File</th><th scope="col" class="num">Line</th><th scope="col">Message</th></tr></thead>
       <tbody>
@@ -97,10 +98,11 @@
         {% endfor %}
       </tbody>
     </table>
+    {% endcall %}
     {% if run.issues_total > run.issues | length %}<p class="footnote">Showing the first {{ max_issues | number }} of {{ run.issues_total | number }} issues.</p>{% endif %}
   </div>
   {% endif %}
-  <div class="table-scroll">
+  {% call c.scroll("Row dispositions by file") %}
     <table class="table" data-section="dispositions">
       <thead>
         <tr><th scope="col">File</th><th scope="col" class="num">Control count</th><th scope="col" class="num">Read</th><th scope="col" class="num">{{ c.term("eligible") }}</th><th scope="col" class="num">{{ c.term("excluded") }}</th><th scope="col" class="num">of which dependent</th><th scope="col" class="num">{{ c.term("rejected") }}</th><th scope="col" class="num">of which dependent</th></tr>
@@ -121,13 +123,14 @@
         {% endfor %}
       </tbody>
     </table>
-  </div>
+  {% endcall %}
   {{ c.definitions(["eligible", "excluded", "rejected"]) }}
 </section>
 
 <div class="grid-2">
   <section class="panel" aria-labelledby="target">
     <header class="panel-header"><h2 id="target">Target records</h2></header>
+    {% call c.scroll("Target records") %}
     <table class="table" data-section="target">
       <thead><tr><th scope="col">Table</th><th scope="col" class="num">{{ c.term("expected") }}</th><th scope="col" class="num">{{ c.term("read-back") }}</th></tr></thead>
       <tbody>
@@ -145,6 +148,7 @@
         </tr>
       </tbody>
     </table>
+    {% endcall %}
     {{ c.definitions(["expected", "read-back"]) }}
   </section>
 
@@ -198,6 +202,7 @@
 
 <section class="panel" aria-labelledby="evidence-files">
   <header class="panel-header"><h2 id="evidence-files">Evidence files</h2></header>
+  {% call c.scroll("Evidence files") %}
   <table class="table table-compact">
     <thead><tr><th scope="col">File</th><th scope="col">State</th><th scope="col">SHA-256 of the bytes read</th></tr></thead>
     <tbody>
@@ -210,5 +215,6 @@
       {% endfor %}
     </tbody>
   </table>
+  {% endcall %}
 </section>
 {% endblock %}

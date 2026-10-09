@@ -266,6 +266,59 @@ root-cause classes and originating lines, unit membership, amounts, and loaded r
 checks the planner and the loaded target against them, and shows that injected planner defects
 fail it. For other extracts, these remain reviewer responsibilities (spec section 12.1).
 
+### Synthetic failure scenarios (`loan_lab.scenarios`, Milestone 8)
+
+A separate, demo-only package, run as `python -m loan_lab.scenarios <scenario|all>`, that
+demonstrates repeatably how the pipeline catches three kinds of failure. Each scenario calls the
+public conversion entry points (`run_conversion`, `run_load`, `reconcile_run`) under a new
+run ID. It then checks the run's recorded evidence (manifest, load report, reconciliation
+report) against the expected outcome.
+
+| Scenario | Input | How the failure arises | Caught by | Expected evidence |
+| --- | --- | --- | --- | --- |
+| `control-totals` (`SYN-CTRL-`) | The sample extract, copied to `data/scenarios/<run_id>/extract/`, with the applications control row misstated (`RECORD_COUNT` +1, `AMOUNT_TOTAL` +9,000.00) | The control file disagrees with the data | Phase 1 run-level checks RUN-04 and RUN-05 | `FAILED`, stage `validation`, both issues listed; four archived files whose checksums match the manifest; `database_transaction: not_started`; no database directory and no load report |
+| `business-rejections` (`SYN-REJ-`) | `sample_data/legacy` unchanged | Invalid amounts (MP-02), applications without a loadable primary (RF-06, RF-07), orphaned and unresolved relationships (RF-01, RF-02, RF-03), malformed values (SV-03, SV-05), and exclusions (EX-01 to EX-05) | The documented business rules | The spec section 15 dispositions and totals; then `RECONCILED`, with every RC rule passing and no discrepancies |
+| `loader-defect` (`SYN-DEFECT-`) | `sample_data/legacy` unchanged | `inject_rate_defect` copies the immutable plan with one mapped value changed: the first eligible application's `interest_rate` + 0.1000 (`0000500101`, 6.5000 → 6.6000). `run_load` loads that plan in its normal single transaction and records the database checksum after the commit. | RC-07, because reconciliation recomputes expected values from the archived source, not from the plan | The load report and manifest match the plan's counts (11 / 6 / 10) and amount (2,281,000.00); `FAILED` at stage `reconciliation`, `rules_failed: ["RC-07"]`, and exactly one discrepancy with expected 6.5000 and actual 6.6000 |
+
+**Safeguards**
+
+- **Isolation.** Nothing in `loan_lab.conversion` imports `loan_lab.scenarios`. The conversion
+  and reconciliation commands have no defect, scenario, or demo option, and no conversion entry
+  point takes one; tests enforce all of this. The planner, loader, evidence, and reconciliation
+  code are unchanged. The defect exists only as a modified copy of one frozen plan in memory.
+- **Labels.** Each scenario requires its own run ID prefix. It writes
+  `data/scenarios/<run_id>/scenario.json`, created exclusively, which records
+  `"synthetic": true` and `"demo_only": true`, the expected outcome, and exactly what was altered.
+  The descriptor sits outside the run's evidence, so the evidence is written only by the normal
+  pipeline and never edited afterwards. The CLI prints a "SYNTHETIC DEMO SCENARIO" banner.
+- **No overwrite.** A run ID is refused before anything is written if it lacks the scenario's
+  prefix, fails the run ID pattern, or already exists under the evidence, conversion, or scenario
+  root. The pipeline's own RUN-07 and evidence reservation checks still apply.
+- **Protected data.** Only new `SYN-*` folders are created. `sample_data/legacy`, `DEMO-001`,
+  other runs, and `data/loan_lab_dev.db` are never written. Everything generated is under
+  `data/` or `output/`, which are git-ignored.
+- **Repeatability.** Apart from run IDs, timestamps, and paths, two runs of the same scenario
+  produce identical validation summaries, archived checksums, load counts, reconciliation rules
+  and discrepancies, and database checksums.
+
+**Tests and limitations.** `tests/test_conversion_scenarios.py` checks:
+- failure detection;
+- preserved evidence and archived checksums;
+- financial controls (counts, requested dollars, and the stored rate);
+- isolation from other runs and project data, and refusal of reused or wrongly prefixed run IDs;
+- repeatability;
+- the CLI;
+- that the existing read-only pages render each run from its evidence.
+
+The limitations:
+- The scenarios cover only the sample extract.
+- The loader defect is simulated in the load input, not inside the loader's SQL, so it stands
+  for any defect between mapping and insert.
+- There is one defect type, a wrong interest rate.
+- Scenario runs show in Conversion Management like any other run. Only the `SYN-` prefix marks
+  them; the web pages do not read `scenario.json`.
+- No command deletes scenario output.
+
 ### Validation (`loan_lab.validation`)
 
 Rules applied between transform and load, for example: required fields present, dates parse correctly, amounts are non-negative, codes map to known values. Failed records go to an exception report rather than the database.
@@ -768,6 +821,7 @@ Implemented: the application skeleton, `GET /health`, and the LOS data model (`B
 storage, the deterministic synthetic data generator (`loan_lab.synthetic`), a read-only
 web interface (`loan_lab.web`) including read-only Conversion Management pages, and phases 1 to 3 of the legacy conversion
 (`loan_lab.conversion.legacy`): validation and mapping into a conversion plan, transactional
-loading into an isolated per-run database, and independent reconciliation. Not yet implemented:
+loading into an isolated per-run database, and independent reconciliation, plus repeatable
+synthetic failure scenarios (`loan_lab.scenarios`). Not yet implemented:
 authentication, editing, database migrations, workflow validation and status transitions,
 collateral policy and LTV, the exception and exclusion reports, and release approval.

@@ -23,6 +23,7 @@
   --danger-soft: rgba(224, 108, 117, 0.14);
   --neutral-soft: rgba(148, 163, 191, 0.14);
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --scroll-shadow: rgba(0, 0, 0, 0.55);
   color-scheme: dark;
 }
 
@@ -48,6 +49,7 @@
   --danger-soft: rgba(192, 65, 76, 0.1);
   --neutral-soft: rgba(85, 98, 125, 0.1);
   --shadow: 0 1px 2px rgba(23, 34, 58, 0.06);
+  --scroll-shadow: rgba(23, 34, 58, 0.22);
   color-scheme: light;
 }
 
@@ -358,6 +360,7 @@ select:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px
 
 .panel-header {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
   justify-content: space-between;
   gap: 1rem;
@@ -417,7 +420,20 @@ select:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px
 
 /* ---------- Tables ---------- */
 
-.table-scroll { overflow-x: auto; }
+/* Wide tables scroll inside their panel, never the page. The "local" layers cover the "scroll"
+   shadows at each end, so a shadow shows only on a side with hidden columns. */
+.table-scroll {
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  max-width: 100%;
+  background:
+    linear-gradient(to right, var(--surface) 40%, transparent) left / 2.5rem 100% no-repeat local,
+    linear-gradient(to left, var(--surface) 40%, transparent) right / 2.5rem 100% no-repeat local,
+    radial-gradient(farthest-side at 0 50%, var(--scroll-shadow), transparent) left / 0.9rem 100% no-repeat scroll,
+    radial-gradient(farthest-side at 100% 50%, var(--scroll-shadow), transparent) right / 0.9rem 100% no-repeat scroll;
+}
+.table-scroll:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.scroll-hint { margin: 0; padding: 0.3rem 1rem; border-bottom: 1px solid var(--border); color: var(--text-faint); font-size: 0.78rem; }
 
 .table {
   width: 100%;
@@ -602,7 +618,12 @@ select:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px
 .table td.wrap { white-space: normal; min-width: 14rem; overflow-wrap: anywhere; }
 .problems { margin: 0.4rem 0 0; padding-left: 1.25rem; }
 .timestamp { white-space: nowrap; }
-.table th .th-note { display: block; font-size: 0.7rem; font-weight: 500; text-transform: none; letter-spacing: 0; color: var(--text-faint); }
+.table th .th-note { display: block; font-size: 0.7rem; font-weight: 500; text-transform: none; letter-spacing: 0; color: var(--text-faint); white-space: normal; }
+.table td.wrap-tight { white-space: normal; min-width: 9rem; max-width: 15rem; overflow-wrap: anywhere; }
+.table td.wrap-tight .badge { white-space: normal; border-radius: 6px; }
+.run-id-compact { white-space: nowrap; }
+.page-header h1 .run-id { overflow-wrap: anywhere; }
+.page-header h1 > span { min-width: 0; }
 .term { cursor: help; text-decoration: underline dotted; text-underline-offset: 0.2em; }
 .definitions { display: grid; grid-template-columns: max-content 1fr; gap: 0.2rem 0.75rem; margin: 0; padding: 0.6rem 1rem 0.75rem; border-top: 1px solid var(--border); color: var(--text-faint); font-size: 0.8rem; }
 .definitions > div { display: contents; }

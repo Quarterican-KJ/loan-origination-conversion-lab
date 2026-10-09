@@ -52,6 +52,18 @@
 </dl>
 {%- endmacro %}
 
+{# A long run ID shows as its start and end; the full ID stays in the title and the accessible
+   name. Only the display is shortened: links and data attributes always use the full ID. #}
+{% macro run_id(value) -%}
+{% if value | length > 24 %}<code class="run-id run-id-compact" title="{{ value }}"><span aria-hidden="true">{{ value[:14] }}…{{ value[-6:] }}</span><span class="visually-hidden">{{ value }}</span></code>
+{%- else %}<code class="run-id">{{ value }}</code>{% endif %}
+{%- endmacro %}
+
+{# Wide tables scroll inside this labeled region instead of widening the page. #}
+{% macro scroll(label) -%}
+<div class="table-scroll" role="region" aria-label="{{ label }}">{{ caller() }}</div>
+{%- endmacro %}
+
 {% macro label_or_na(value) -%}
 {% if value is none %}{{ na() }}{% else %}{{ value | label }}{% endif %}
 {%- endmacro %}

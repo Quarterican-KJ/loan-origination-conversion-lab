@@ -49,6 +49,42 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") setSidebar(false);
 });
 
+// Wide tables scroll inside .table-scroll. Only while a table overflows does its region get a
+// visible hint and a tab stop, so keyboard users can focus it and scroll with the arrow keys.
+let scrollHints = 0;
+
+function syncScrollRegion(region) {
+  const overflowing = region.scrollWidth > region.clientWidth + 1;
+  let hint = region.previousElementSibling;
+  if (!hint || !hint.hasAttribute("data-scroll-hint")) {
+    if (!overflowing) return;
+    hint = document.createElement("p");
+    hint.className = "scroll-hint";
+    hint.id = `scroll-hint-${++scrollHints}`;
+    hint.setAttribute("data-scroll-hint", "");
+    hint.textContent = "Scroll sideways to see all columns: swipe, or focus the table and use the arrow keys.";
+    region.before(hint);
+  }
+  hint.hidden = !overflowing;
+  region.toggleAttribute("data-overflowing", overflowing);
+  if (overflowing) {
+    region.tabIndex = 0;
+    if (!region.hasAttribute("role")) region.setAttribute("role", "region");
+    if (!region.hasAttribute("aria-label")) region.setAttribute("aria-label", "Scrollable table");
+    region.setAttribute("aria-describedby", hint.id);
+  } else {
+    region.removeAttribute("tabindex");
+    region.removeAttribute("aria-describedby");
+  }
+}
+
+const scrollRegions = document.querySelectorAll(".table-scroll");
+scrollRegions.forEach(syncScrollRegion);
+if ("ResizeObserver" in window) {
+  const observer = new ResizeObserver((entries) => entries.forEach((entry) => syncScrollRegion(entry.target)));
+  scrollRegions.forEach((region) => observer.observe(region));
+}
+
 // Filter selects apply immediately; the Apply button remains for keyboard and no-JS use.
 document.querySelectorAll("form[data-auto-submit] select").forEach((select) => {
   select.addEventListener("change", () => select.form.requestSubmit());

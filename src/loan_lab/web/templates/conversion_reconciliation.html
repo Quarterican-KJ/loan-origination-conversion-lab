@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% import "_conversion.html" as c with context %}
 {% block title %}Reconciliation · {{ run.run_id }}{% endblock %}
-{% block breadcrumbs %}<a href="{{ url_for('dashboard') }}">Dashboard</a><span class="sep">/</span><a href="{{ url_for('conversions') }}">Conversions</a><span class="sep">/</span><a href="{{ url_for('conversion', run_id=run.run_id) }}">{{ run.run_id }}</a><span class="sep">/</span><span aria-current="page">Reconciliation</span>{% endblock %}
+{% block breadcrumbs %}<a href="{{ url_for('dashboard') }}">Dashboard</a><span class="sep">/</span><a href="{{ url_for('conversions') }}">Conversions</a><span class="sep">/</span><a href="{{ url_for('conversion', run_id=run.run_id) }}">{{ c.run_id(run.run_id) }}</a><span class="sep">/</span><span aria-current="page">Reconciliation</span>{% endblock %}
 {% block content %}
 {{ c.run_header(run, "reconciliation", success_notice=false) }}
 {% set rec = run.reconciliation %}
@@ -31,7 +31,7 @@
     <h2 id="rules">Rules</h2>
     <span class="muted">Report generated: <span data-field="generated-at">{{ c.timestamp(view.generated_at) }}</span>{% if rec and rec.attempt %} · Attempt <code>{{ rec.attempt }}</code>{% endif %}</span>
   </header>
-  <div class="table-scroll">
+  {% call c.scroll("Reconciliation rules") %}
     <table class="table">
       <thead><tr><th scope="col">Rule</th><th scope="col">Check</th><th scope="col">Result</th><th scope="col" class="num">{{ c.term("checked") }}</th><th scope="col" class="num">Discrepancies</th><th scope="col">Note</th></tr></thead>
       <tbody>
@@ -47,7 +47,7 @@
         {% endfor %}
       </tbody>
     </table>
-  </div>
+  {% endcall %}
   {{ c.definitions(["checked"]) }}
 </section>
 
@@ -55,6 +55,7 @@
 <div class="grid-2">
   <section class="panel" aria-labelledby="row-totals">
     <header class="panel-header"><h2 id="row-totals">Row accounting</h2></header>
+    {% call c.scroll("Row accounting") %}
     <table class="table">
       <thead><tr><th scope="col">File</th><th scope="col" class="num">Read</th><th scope="col" class="num">{{ c.term("loaded") }}</th><th scope="col" class="num">{{ c.term("excluded") }}</th><th scope="col" class="num">{{ c.term("rejected") }}</th></tr></thead>
       <tbody>
@@ -70,6 +71,7 @@
         </tr>
       </tbody>
     </table>
+    {% endcall %}
     {{ c.definitions(["loaded", "excluded", "rejected"]) }}
   </section>
   <section class="panel" aria-labelledby="amount-totals">
