@@ -30,6 +30,11 @@
           <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M3 4h14v2H3zM3 9h14v2H3zM3 14h14v2H3z"/></svg>
           Applications
         </a>
+        <span class="nav-heading">Conversion</span>
+        <a class="nav-link" href="{{ url_for('conversions') }}" {% if active == 'conversions' %}aria-current="page"{% endif %}>
+          <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M3 3h9l3 3v4h-2V7h-3V5H5v10h5v2H3zM12 12h5v2h-5zM12 15h5v2h-5zM14 9l4 2-4 2z"/></svg>
+          Conversions
+        </a>
       </nav>
       <div class="sidebar-footer">
         <span class="pill pill-muted">Synthetic data</span>

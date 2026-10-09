@@ -638,6 +638,8 @@ Server-rendered pages over the development database (`data/loan_lab_dev.db`):
 | `routes.py` | Input validation and template context |
 | `formatting.py` | Jinja filters for money, rates, dates, and labels |
 | `setup.py` | Wires routes, static files, and HTML error pages into the FastAPI app |
+| `conversions.py` | Reads and assesses conversion run evidence (no database access) |
+| `conversion_routes.py` | The Conversion Management pages |
 
 ### Read-only guarantees
 
@@ -663,9 +665,87 @@ Server-rendered pages over the development database (`data/loan_lab_dev.db`):
 - **Unknown values.** A missing appraisal shows as "Unknown", never `$0`. A missing pledged
   amount shows as "Not specified".
 
+### Conversion Management (`conversions.py`, `conversion_routes.py`)
+
+Read-only pages over the per-run evidence in `output/conversion/<run_id>/`. The root comes from
+`create_app(evidence_root=...)`, which defaults to `paths.default_evidence_root()`.
+
+| Route | Page |
+| --- | --- |
+| `GET /conversions` | Runs: ID, recorded status, trust condition, source rows read, target rows loaded, requested volume loaded, reconciliation outcome, timestamps |
+| `GET /conversions/{run_id}` | Summary: status and evidence state, failure, source files and checksums, validation issues, row dispositions, financial totals, expected and loaded target counts, warnings (WN-01), reconciliation record, evidence file states |
+| `GET /conversions/{run_id}/reconciliation` | RC-01 to RC-10 results, notes, totals, and field-level discrepancies (expected and actual values, source line, target ID) |
+
+**Evidence sources.** Only `manifest.json`, `reports/load_result.json`,
+`reports/reconciliation.json`, and the archived files under `source/` are read. Paths recorded
+inside the evidence (such as `database_path`) are never followed, so the pages never open a
+conversion database or `loan_lab_dev.db`. The database checksum is displayed as recorded.
+
+**Trust assessment.** The recorded status is shown as recorded. Separately, the page assigns
+one of these trust conditions:
+
+| Condition | When |
+| --- | --- |
+| Reconciled · awaiting release approval | `RECONCILED`, with no problems found below |
+| Loaded · not reconciled | `LOADED`, ready for reconciliation, with no problems found below |
+| Failed | `FAILED` |
+| Outcome unknown | `UNKNOWN` |
+| Interrupted or in progress | `STARTED`, `VALIDATED`, or `LOADING` with no incomplete evidence |
+| Untrusted evidence | Any problem below, or an unrecognized status |
+| Evidence not available | The manifest is missing, malformed, oversized, or unsafe |
+
+A `LOADED` or `RECONCILED` run must also meet every one of these checks:
+
+- The evidence is complete and the database transaction committed.
+- The source is verified, and each archived file still hashes to its planned checksum.
+- `load_result.json` reports success for this run, with the recorded database checksum and
+  loaded counts equal to the expected counts.
+
+For `RECONCILED`, the reconciliation record must also be `final` and `passed`. The report must
+then pass these checks:
+
+- Its SHA-256 equals the checksum recorded in the manifest.
+- Its run ID, attempt, and database checksum match the manifest.
+- Its result is PASS, all ten rules pass exactly once, and it lists no discrepancies.
+
+Any failure is listed on the page and makes the run "Untrusted evidence". A `LOADED` run with an
+in-progress, unfinalized, or conflicting reconciliation attempt is also untrusted. So is any
+manifest with a non-null `release`.
+
+Rule results from a report that does not verify are labeled "(unverified)". Nothing is ever
+labeled "Released".
+
+**Safety.**
+
+- **Run IDs.** A run ID must match the converter's pattern, 1 to 64 letters, digits, `-` or
+  `_`, starting with a letter or digit. Windows reserved device names are refused. Invalid IDs
+  return `400`.
+- **Containment.** The resolved run directory must be an immediate child of the resolved
+  evidence root, with exactly the requested name. Symbolic links and junctions, for directories
+  and for evidence files, are refused. A missing run returns `404`, and a missing root is
+  never created.
+- **Size caps.** File sizes are checked before reading: manifest 2 MiB, load report 1 MiB,
+  reconciliation report 16 MiB.
+- **Parsing.** JSON is parsed with `Decimal` floats. `NaN` and `Infinity` are rejected, and the
+  top level must be an object.
+- **Malformed values.** A malformed field shows as "Not available" instead of failing the
+  page. A missing, oversized, malformed, unreadable, or unsafe file is labeled with its state.
+- **Archive hashing.** Archived sources are re-hashed in streamed chunks, up to 64 MiB per file.
+- **Bounded scanning.** The list scans at most 1,000 directory entries and shows the 200 most
+  recently modified valid runs. Invalid names, plain files, and links are counted as skipped.
+- **Display caps.** Pages show at most 500 discrepancies, 200 validation issues, and 200 list
+  items. Text values are truncated to 2,000 characters.
+- **Escaping and no actions.** All strings are autoescaped. Only `GET` routes exist, and there
+  are no approval, upload, execution, editing, or promotion controls.
+
 ### Limitations
 
-- No authentication, editing, workflow transitions, or conversion views.
+- No authentication, editing, workflow transitions, or release approval.
+- Conversion Management does not re-hash conversion databases. The checksum shown is the
+  recorded one, and only `verify_reconciliation` re-checks it.
+- The conversion list does not re-hash archived sources, to keep it cheap. The summary and
+  reconciliation pages do.
+- The conversion list shows at most 200 runs, with no pagination, sorting, or filtering.
 - Offset pagination. Deep pages on very large datasets get slower, and there is no column
   sorting.
 - SQLite's `LIKE` is case-insensitive for ASCII letters only.
@@ -685,8 +765,8 @@ Server-rendered pages over the development database (`data/loan_lab_dev.db`):
 
 Implemented: the application skeleton, `GET /health`, and the LOS data model (`Borrower`,
 `LoanApplication`, `ApplicationParty`, `Collateral`, `CollateralPledge`, `Lien`) with exact decimal
-storage, the deterministic synthetic data generator (`loan_lab.synthetic`), and a read-only
-web interface (`loan_lab.web`), and phases 1 to 3 of the legacy conversion
+storage, the deterministic synthetic data generator (`loan_lab.synthetic`), a read-only
+web interface (`loan_lab.web`) including read-only Conversion Management pages, and phases 1 to 3 of the legacy conversion
 (`loan_lab.conversion.legacy`): validation and mapping into a conversion plan, transactional
 loading into an isolated per-run database, and independent reconciliation. Not yet implemented:
 authentication, editing, database migrations, workflow validation and status transitions,

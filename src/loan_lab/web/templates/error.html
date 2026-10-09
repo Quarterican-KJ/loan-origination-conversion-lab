@@ -6,6 +6,6 @@
   <h1>{{ title }}</h1>
   <p>{{ message }}</p>
   {% if hint %}<p class="hint"><code>{{ hint }}</code></p>{% endif %}
-  <p><a class="button button-ghost" href="{{ url_for('applications') }}">Application directory</a> <a class="button button-ghost" href="{{ url_for('dashboard') }}">Dashboard</a></p>
+  <p>{% if active == 'conversions' %}<a class="button button-ghost" href="{{ url_for('conversions') }}">Conversion runs</a> {% endif %}<a class="button button-ghost" href="{{ url_for('applications') }}">Application directory</a> <a class="button button-ghost" href="{{ url_for('dashboard') }}">Dashboard</a></p>
 </section>
 {% endblock %}

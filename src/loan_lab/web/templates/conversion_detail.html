@@ -1,0 +1,214 @@
+{% extends "base.html" %}
+{% import "_conversion.html" as c with context %}
+{% block title %}Run {{ run.run_id }}{% endblock %}
+{% block breadcrumbs %}<a href="{{ url_for('dashboard') }}">Dashboard</a><span class="sep">/</span><a href="{{ url_for('conversions') }}">Conversions</a><span class="sep">/</span><span aria-current="page">{{ run.run_id }}</span>{% endblock %}
+{% block content %}
+{{ c.run_header(run, "summary") }}
+
+{% if not run.manifest.ok %}
+<section class="panel" data-section="manifest-unavailable">
+  <div class="empty">
+    <p><code>manifest.json</code>: {{ run.manifest.label }}{% if run.manifest.detail %} ({{ run.manifest.detail }}){% endif %}.</p>
+    <p>Without a readable manifest nothing about this run can be shown or trusted.</p>
+  </div>
+</section>
+{% else %}
+
+<section class="panel" aria-labelledby="lifecycle">
+  <header class="panel-header"><h2 id="lifecycle">Lifecycle</h2></header>
+  <dl class="facts">
+    <div><dt>Recorded status</dt><dd data-field="status">{{ c.status_badge(run) }}</dd></div>
+    <div><dt>Evidence state</dt><dd data-field="evidence-state">{{ c.label_or_na(run.evidence_state) }}</dd></div>
+    <div><dt>Database transaction</dt><dd data-field="transaction">{{ c.label_or_na(run.database_transaction) }}</dd></div>
+    {% if run.condition.value == "reconciled" %}
+    <div><dt>Reconciliation readiness</dt><dd data-field="ready" data-recorded="{{ run.ready_for_reconciliation | lower }}" title="Recorded readiness flag: {{ c.flag(run.ready_for_reconciliation) | striptags }}. A reconciled run no longer awaits reconciliation.">Already reconciled</dd></div>
+    {% else %}
+    <div><dt>Ready for reconciliation</dt><dd data-field="ready">{{ c.flag(run.ready_for_reconciliation) }}</dd></div>
+    {% endif %}
+    <div><dt>Load outcome</dt><dd data-field="load-outcome">{{ c.label_or_na(run.load_outcome) }}</dd></div>
+    <div><dt>Release</dt><dd data-field="release">{% if run.release_recorded %}<span class="unknown">Unexpected release record</span>{% else %}Not released{% endif %}</dd></div>
+    <div><dt>Started</dt><dd data-field="started">{{ c.timestamp(run.started_at) }}</dd></div>
+    <div><dt>Last updated</dt><dd data-field="updated">{{ c.timestamp(run.updated_at) }}</dd></div>
+    <div><dt>Finished</dt><dd data-field="finished">{{ c.timestamp(run.finished_at) }}</dd></div>
+    <div><dt>Database checksum (recorded)</dt><dd data-field="database-sha">{{ c.hash(run.database_sha256) }}</dd></div>
+    {% if run.recovered_at %}<div><dt>Recovered</dt><dd data-field="recovered">{{ c.timestamp(run.recovered_at) }}</dd></div>{% endif %}
+    {% if run.evidence_error %}<div><dt>Evidence error</dt><dd data-field="evidence-error">{{ run.evidence_error }}</dd></div>{% endif %}
+  </dl>
+  {% if run.failure %}
+  <div class="subsection" data-section="failure">
+    <h4>Failure</h4>
+    <dl class="facts">
+      <div><dt>Stage</dt><dd data-field="failure-stage">{{ c.label_or_na(run.failure.stage) }}</dd></div>
+      <div><dt>Step</dt><dd>{{ c.text(run.failure.step) }}</dd></div>
+      <div><dt>Rule</dt><dd>{{ c.text(run.failure.rule) }}</dd></div>
+      <div class="fact-wide"><dt>Reason</dt><dd data-field="failure-reason">{{ c.text(run.failure.reason) }}</dd></div>
+    </dl>
+  </div>
+  {% endif %}
+</section>
+
+<section class="panel" aria-labelledby="sources">
+  <header class="panel-header">
+    <h2 id="sources">Source files</h2>
+    <span class="muted">Recorded verification: {{ c.flag(run.source_verified, "Verified", "Not verified") }}</span>
+  </header>
+  <div class="table-scroll">
+    <table class="table table-compact">
+      <thead><tr><th scope="col">File</th><th scope="col" class="num">Bytes</th><th scope="col">Planned SHA-256</th><th scope="col">Archived SHA-256</th><th scope="col">Recorded</th><th scope="col">Archived copy now</th></tr></thead>
+      <tbody>
+        {% for source in run.source_files %}
+        <tr data-source-file="{{ source.name }}">
+          <td><code>{{ source.name }}</code></td>
+          {% if not source.recorded %}
+          <td colspan="5">{{ c.na() }}</td>
+          {% else %}
+          <td class="num">{{ c.count(source.bytes) }}</td>
+          <td>{{ c.hash(source.planned_sha256) }}</td>
+          <td>{{ c.hash(source.archived_sha256) }}</td>
+          <td>{% if source.error %}<span class="badge result-fail">{{ source.error }}</span>{% else %}{{ c.flag(source.verified, "Verified", "Not verified") }}{% endif %}</td>
+          <td data-field="archive-check">
+            {% if source.archive_check == "matches" %}<span class="badge result-pass">Matches</span>
+            {% elif source.archive_check == "differs" %}<span class="badge result-fail">Differs</span> {{ c.hash(source.current_sha256) }}
+            {% elif source.archive_check is none %}{{ c.na("No archived checksum is recorded.") }}
+            {% else %}<span class="unknown">Not checked: {{ source.archive_check | label | lower }}</span>{% endif %}
+          </td>
+          {% endif %}
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p class="footnote panel-footnote">Archived copies are re-hashed on each view (files over the size limit are not). The conversion database is never opened by this interface; its checksum is shown as recorded. To re-check the database too, use <code>verify_reconciliation</code>.</p>
+</section>
+
+<section class="panel" aria-labelledby="validation">
+  <header class="panel-header">
+    <h2 id="validation">Validation and dispositions</h2>
+    <span class="muted">Run-level checks: <strong data-field="run-level-checks">{{ c.label_or_na(run.run_level_checks) }}</strong> · Extract date: {{ c.text(run.extract_date) }}</span>
+  </header>
+  {% if run.issues %}
+  <div class="subsection" data-section="issues">
+    <h4>Run-level issues <span class="count">{{ run.issues_total | number }}</span></h4>
+    <table class="table table-compact">
+      <thead><tr><th scope="col">Rule</th><th scope="col">File</th><th scope="col" class="num">Line</th><th scope="col">Message</th></tr></thead>
+      <tbody>
+        {% for issue in run.issues %}
+        <tr><td>{{ c.text(issue.rule) }}</td><td>{{ c.text(issue.file) }}</td><td class="num">{{ c.count(issue.line) }}</td><td class="wrap">{{ c.text(issue.message) }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% if run.issues_total > run.issues | length %}<p class="footnote">Showing the first {{ max_issues | number }} of {{ run.issues_total | number }} issues.</p>{% endif %}
+  </div>
+  {% endif %}
+  <div class="table-scroll">
+    <table class="table" data-section="dispositions">
+      <thead>
+        <tr><th scope="col">File</th><th scope="col" class="num">Control count</th><th scope="col" class="num">Read</th><th scope="col" class="num">{{ c.term("eligible") }}</th><th scope="col" class="num">{{ c.term("excluded") }}</th><th scope="col" class="num">of which dependent</th><th scope="col" class="num">{{ c.term("rejected") }}</th><th scope="col" class="num">of which dependent</th></tr>
+      </thead>
+      <tbody>
+        {% for file in CONVERSION_DATA_FILES %}
+        {% set rows = run.rows[file] %}
+        <tr data-file="{{ file }}">
+          <td><code>{{ file }}</code></td>
+          <td class="num">{{ c.count(run.control_counts[file]) }}</td>
+          <td class="num" data-field="read">{{ c.count(rows.read) }}</td>
+          <td class="num" data-field="eligible">{{ c.count(rows.loaded) }}</td>
+          <td class="num" data-field="excluded">{{ c.count(rows.excluded) }}</td>
+          <td class="num">{{ c.count(rows.excluded_dependent) }}</td>
+          <td class="num" data-field="rejected">{{ c.count(rows.rejected) }}</td>
+          <td class="num">{{ c.count(rows.rejected_dependent) }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {{ c.definitions(["eligible", "excluded", "rejected"]) }}
+</section>
+
+<div class="grid-2">
+  <section class="panel" aria-labelledby="target">
+    <header class="panel-header"><h2 id="target">Target records</h2></header>
+    <table class="table" data-section="target">
+      <thead><tr><th scope="col">Table</th><th scope="col" class="num">{{ c.term("expected") }}</th><th scope="col" class="num">{{ c.term("read-back") }}</th></tr></thead>
+      <tbody>
+        {% for table in target_tables %}
+        <tr data-target="{{ table }}">
+          <td>{{ table | label }}</td>
+          <td class="num">{{ c.count(run.expected_target[table] if run.expected_target else none) }}</td>
+          <td class="num" data-field="loaded">{{ c.count(run.loaded_target[table] if run.loaded_target else none) }}</td>
+        </tr>
+        {% endfor %}
+        <tr data-target="requested_amount">
+          <td>Requested amount</td>
+          <td class="num">{{ c.amount(run.expected_target.requested_amount if run.expected_target else none) }}</td>
+          <td class="num" data-field="loaded">{{ c.amount(run.loaded_target.requested_amount if run.loaded_target else none) }}</td>
+        </tr>
+      </tbody>
+    </table>
+    {{ c.definitions(["expected", "read-back"]) }}
+  </section>
+
+  <section class="panel" aria-labelledby="financial">
+    <header class="panel-header"><h2 id="financial">Financial totals (REQ_AMT)</h2></header>
+    <dl class="facts" data-section="financial">
+      <div><dt>Control total</dt><dd data-field="control-amount">{{ c.amount(run.control_amount) }}</dd></div>
+      <div><dt>Control total verified</dt><dd>{{ c.flag(run.control_amount_verified, "Verified", "Unverifiable") }}</dd></div>
+      <div><dt>{{ c.term("eligible") }}</dt><dd data-field="amount-eligible">{{ c.amount(run.amounts.get("eligible")) }}</dd></div>
+      <div><dt>{{ c.term("excluded") }}</dt><dd data-field="amount-excluded">{{ c.amount(run.amounts.get("excluded")) }}</dd></div>
+      <div><dt>{{ c.term("rejected") }}</dt><dd data-field="amount-rejected">{{ c.amount(run.amounts.get("rejected")) }}</dd></div>
+      <div><dt>Unparseable amounts</dt><dd>{{ c.count(run.unparseable_amounts) }}</dd></div>
+    </dl>
+  </section>
+</div>
+
+<div class="grid-2">
+  <section class="panel" aria-labelledby="warnings">
+    <header class="panel-header"><h2 id="warnings">Warnings and exceptions</h2></header>
+    <dl class="facts">
+      <div><dt>Rejection issues recorded</dt><dd data-field="rejections">{{ c.count(run.rejections) }}</dd></div>
+      <div class="fact-wide">
+        <dt>WN-01: customers without converted applications</dt>
+        <dd data-field="wn01">
+          {% if run.customers_without_applications is none %}{{ c.na() }}
+          {% elif run.customers_without_applications %}{% for key in run.customers_without_applications %}<code>{{ key }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
+          {% else %}<span class="muted">None</span>{% endif %}
+        </dd>
+      </div>
+    </dl>
+    <p class="footnote panel-footnote">The exception, exclusion, and warning reports are not produced yet; these figures come from the manifest's validation summary.</p>
+  </section>
+
+  <section class="panel" aria-labelledby="reconciliation-summary">
+    <header class="panel-header">
+      <h2 id="reconciliation-summary">Reconciliation</h2>
+      <a href="{{ url_for('conversion_reconciliation', run_id=run.run_id) }}">View rules</a>
+    </header>
+    {% set rec = run.reconciliation %}
+    <dl class="facts">
+      <div class="fact-wide"><dt>Outcome</dt><dd data-field="reconciliation-outcome">{% if rec is none %}{{ c.na() }}{% else %}{{ rec.outcome }}{% endif %}</dd></div>
+      <div><dt>Attempt state</dt><dd>{{ c.label_or_na(rec.state if rec else none) }}</dd></div>
+      <div><dt>Release review</dt><dd data-field="release-review">{{ c.label_or_na(rec.release_review if rec else none) }}</dd></div>
+      <div><dt>Reconciled</dt><dd data-field="reconciled-at">{{ c.timestamp(rec.reconciled_at if rec else none) }}</dd></div>
+      <div><dt>Discrepancies</dt><dd>{{ c.count(rec.discrepancies if rec else none) }}</dd></div>
+      {% if rec and rec.rules_failed %}<div><dt>Failed rules</dt><dd>{{ rec.rules_failed | join(", ") }}</dd></div>{% endif %}
+    </dl>
+  </section>
+</div>
+{% endif %}
+
+<section class="panel" aria-labelledby="evidence-files">
+  <header class="panel-header"><h2 id="evidence-files">Evidence files</h2></header>
+  <table class="table table-compact">
+    <thead><tr><th scope="col">File</th><th scope="col">State</th><th scope="col">SHA-256 of the bytes read</th></tr></thead>
+    <tbody>
+      {% for file in [run.manifest, run.load_report, run.reconciliation_report] %}
+      <tr data-evidence-file="{{ file.path }}" data-state="{{ file.state.value }}">
+        <td><code>{{ file.path }}</code></td>
+        <td>{% if file.ok %}{{ file.label }}{% else %}<span class="unknown">{{ file.label }}</span>{% if file.detail %} <span class="muted">{{ file.detail }}</span>{% endif %}{% endif %}</td>
+        <td>{{ c.hash(file.sha256) }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

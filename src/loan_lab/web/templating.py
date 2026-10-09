@@ -2,6 +2,7 @@ from pathlib import Path
 
 from fastapi.templating import Jinja2Templates
 
+from loan_lab.conversion.legacy.contract import DATA_FILES
 from loan_lab.models import ApplicationStatus, LoanProduct
 from loan_lab.web.formatting import FILTERS
 
@@ -15,4 +16,5 @@ templates.env.globals.update(
     APP_NAME="Loan Origination & Conversion Lab",
     PRODUCTS=list(LoanProduct),
     STATUSES=list(ApplicationStatus),
+    CONVERSION_DATA_FILES=list(DATA_FILES),
 )

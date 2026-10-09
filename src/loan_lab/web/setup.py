@@ -11,7 +11,9 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy.exc import OperationalError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from loan_lab.paths import default_database_path
+from loan_lab.paths import default_database_path, default_evidence_root
+from loan_lab.web.conversion_routes import router as conversion_router
+from loan_lab.web.conversions import InvalidRunId
 from loan_lab.web.database import DatabaseUnavailable, create_readonly_engine
 from loan_lab.web.routes import InvalidQuery, router
 from loan_lab.web.templating import STATIC_DIR, templates
@@ -19,18 +21,29 @@ from loan_lab.web.templating import STATIC_DIR, templates
 SEED_COMMAND = "python -m loan_lab.synthetic --preset demo"
 
 
-def install_web(app: FastAPI, database_path: Path | None = None) -> None:
+def install_web(
+    app: FastAPI, database_path: Path | None = None, evidence_root: Path | None = None
+) -> None:
     if database_path is None:
         try:
             database_path = default_database_path()
         except FileNotFoundError:
             database_path = None
+    if evidence_root is None:
+        try:
+            evidence_root = default_evidence_root()
+        except FileNotFoundError:
+            evidence_root = None
     app.state.database_path = database_path
     app.state.engine = create_readonly_engine(database_path) if database_path else None
+    # Conversion evidence is read from here only; it is never created or written.
+    app.state.evidence_root = evidence_root
 
     app.include_router(router)
+    app.include_router(conversion_router)
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     app.add_exception_handler(InvalidQuery, _invalid_query)
+    app.add_exception_handler(InvalidRunId, _invalid_run_id)
     app.add_exception_handler(RequestValidationError, _invalid_request)
     app.add_exception_handler(DatabaseUnavailable, _database_unavailable)
     app.add_exception_handler(OperationalError, _database_error)
@@ -51,6 +64,16 @@ def _error(
 async def _invalid_query(request: Request, exc: Exception) -> HTMLResponse:
     assert isinstance(exc, InvalidQuery)
     return _error(request, 400, "Invalid search or filter", exc.message)
+
+
+async def _invalid_run_id(request: Request, exc: Exception) -> HTMLResponse:
+    assert isinstance(exc, InvalidRunId)
+    return _error(
+        request,
+        400,
+        "Invalid run ID",
+        "Run IDs are 1 to 64 letters, digits, '-' or '_', starting with a letter or digit.",
+    )
 
 
 async def _invalid_request(request: Request, exc: Exception) -> HTMLResponse:

@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+{% import "_conversion.html" as c with context %}
+{% block title %}Reconciliation · {{ run.run_id }}{% endblock %}
+{% block breadcrumbs %}<a href="{{ url_for('dashboard') }}">Dashboard</a><span class="sep">/</span><a href="{{ url_for('conversions') }}">Conversions</a><span class="sep">/</span><a href="{{ url_for('conversion', run_id=run.run_id) }}">{{ run.run_id }}</a><span class="sep">/</span><span aria-current="page">Reconciliation</span>{% endblock %}
+{% block content %}
+{{ c.run_header(run, "reconciliation", success_notice=false) }}
+{% set rec = run.reconciliation %}
+
+{% if not run.reconciliation_report.ok %}
+<div class="notice" role="status" data-report="unavailable">
+  No reconciliation report can be shown: <code>{{ run.reconciliation_report.path }}</code> is {{ run.reconciliation_report.label | lower }}{% if run.reconciliation_report.detail %} ({{ run.reconciliation_report.detail }}){% endif %}.
+  Recorded outcome: <strong data-field="reconciliation-outcome">{% if rec is none %}Not available{% else %}{{ rec.outcome }}{% endif %}</strong>.
+</div>
+{% elif not view.report_verified %}
+<div class="notice notice-danger" role="alert" data-report="unverified">
+  <strong>This report does not verify against the run's manifest.</strong> Its contents are shown for investigation only and are not a reconciliation outcome.
+  {% if view.report_problems %}<ul class="problems">{% for problem in view.report_problems %}<li>{{ problem }}</li>{% endfor %}</ul>{% endif %}
+</div>
+{% elif view.result == "PASS" %}
+<div class="notice notice-success" role="status" data-report="pass">
+  All rules RC-01 to RC-10 passed and the evidence verifies. The run awaits a separate release approval; it has <strong>not</strong> been released.
+</div>
+{% else %}
+<div class="notice notice-danger" role="status" data-report="fail">
+  Reconciliation found {{ c.count(view.discrepancies_total) }} discrepancies. The run is failed and cannot be released.
+</div>
+{% endif %}
+
+<section class="panel" aria-labelledby="rules">
+  <header class="panel-header">
+    <h2 id="rules">Rules</h2>
+    <span class="muted">Report generated: <span data-field="generated-at">{{ c.timestamp(view.generated_at) }}</span>{% if rec and rec.attempt %} · Attempt <code>{{ rec.attempt }}</code>{% endif %}</span>
+  </header>
+  <div class="table-scroll">
+    <table class="table">
+      <thead><tr><th scope="col">Rule</th><th scope="col">Check</th><th scope="col">Result</th><th scope="col" class="num">{{ c.term("checked") }}</th><th scope="col" class="num">Discrepancies</th><th scope="col">Note</th></tr></thead>
+      <tbody>
+        {% for rule in view.rules %}
+        <tr data-rule="{{ rule.rule }}">
+          <td><code>{{ rule.rule }}</code></td>
+          <td>{{ rule.title }}</td>
+          <td data-field="result">{{ c.rule_result(rule.result, view.report_verified) }}</td>
+          <td class="num">{{ c.count(rule.checked) }}</td>
+          <td class="num">{% if rule.discrepancies %}<a href="#discrepancies-{{ rule.rule }}">{{ rule.discrepancies | number }}</a>{% else %}{{ c.count(rule.discrepancies) }}{% endif %}</td>
+          <td class="wrap">{% if rule.note %}{{ rule.note }}{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {{ c.definitions(["checked"]) }}
+</section>
+
+{% if run.reconciliation_report.ok %}
+<div class="grid-2">
+  <section class="panel" aria-labelledby="row-totals">
+    <header class="panel-header"><h2 id="row-totals">Row accounting</h2></header>
+    <table class="table">
+      <thead><tr><th scope="col">File</th><th scope="col" class="num">Read</th><th scope="col" class="num">{{ c.term("loaded") }}</th><th scope="col" class="num">{{ c.term("excluded") }}</th><th scope="col" class="num">{{ c.term("rejected") }}</th></tr></thead>
+      <tbody>
+        {% for file in CONVERSION_DATA_FILES %}
+        {% set rows = view.rows[file] %}
+        <tr data-file="{{ file }}"><td><code>{{ file }}</code></td><td class="num">{{ c.count(rows.read) }}</td><td class="num">{{ c.count(rows.loaded) }}</td><td class="num">{{ c.count(rows.excluded) }}</td><td class="num">{{ c.count(rows.rejected) }}</td></tr>
+        {% endfor %}
+        <tr data-target="actual">
+          <td>In the target database</td>
+          <td></td>
+          <td class="num" title="Borrowers / Applications / Parties">{% if view.target is none %}{{ c.na() }}{% else %}{{ c.count(view.target.borrowers) }} / {{ c.count(view.target.applications) }} / {{ c.count(view.target.parties) }}{% endif %}</td>
+          <td></td><td></td>
+        </tr>
+      </tbody>
+    </table>
+    {{ c.definitions(["loaded", "excluded", "rejected"]) }}
+  </section>
+  <section class="panel" aria-labelledby="amount-totals">
+    <header class="panel-header"><h2 id="amount-totals">Requested amounts</h2></header>
+    <dl class="facts" data-section="amounts">
+      <div><dt>Source total</dt><dd data-field="source-total">{{ c.amount(view.amounts.get("source_total")) }}</dd></div>
+      <div><dt>Control total</dt><dd>{{ c.amount(view.amounts.get("control_total")) }}</dd></div>
+      <div><dt>{{ c.term("loaded") }}</dt><dd data-field="loaded-total">{{ c.amount(view.amounts.get("loaded")) }}</dd></div>
+      <div><dt>{{ c.term("excluded") }}</dt><dd>{{ c.amount(view.amounts.get("excluded")) }}</dd></div>
+      <div><dt>{{ c.term("rejected") }}</dt><dd>{{ c.amount(view.amounts.get("rejected")) }}</dd></div>
+      <div><dt>In the target database</dt><dd data-field="target-total">{{ c.amount(view.amounts.get("target_total")) }}</dd></div>
+    </dl>
+  </section>
+</div>
+
+<section class="section" aria-labelledby="discrepancies">
+  <h2 class="section-title" id="discrepancies">Discrepancies <span class="count" data-discrepancy-total>{% if view.discrepancies_total is none %}?{% else %}{{ view.discrepancies_total | number }}{% endif %}</span></h2>
+  {% if view.discrepancies_total is none %}
+  <div class="panel"><p class="empty">{{ c.na() }} The report's discrepancy list cannot be read.</p></div>
+  {% elif not view.discrepancies %}
+  <div class="panel"><p class="empty">No discrepancies recorded.</p></div>
+  {% else %}
+  {% if view.discrepancies_total > view.discrepancies | length %}
+  <div class="notice notice-warning-inline" role="status">Showing the first {{ max_discrepancies | number }} of {{ view.discrepancies_total | number }} discrepancies. The full list is in <code>reports/reconciliation.json</code>.</div>
+  {% endif %}
+  {% for rule in view.rules %}
+  {% set items = view.by_rule[rule.rule] %}
+  {% if items %}
+  <article class="panel" id="discrepancies-{{ rule.rule }}" data-discrepancies="{{ rule.rule }}">
+    <header class="panel-header"><h3><code>{{ rule.rule }}</code> {{ rule.title }} <span class="count">{{ items | length }}</span></h3></header>
+    {% with items=items %}{% include "_discrepancy_table.html" %}{% endwith %}
+  </article>
+  {% endif %}
+  {% endfor %}
+  {% if view.other_discrepancies %}
+  <article class="panel" data-discrepancies="other">
+    <header class="panel-header"><h3>Unrecognized rule codes <span class="count">{{ view.other_discrepancies | length }}</span></h3></header>
+    {% with items=view.other_discrepancies %}{% include "_discrepancy_table.html" %}{% endwith %}
+  </article>
+  {% endif %}
+  {% endif %}
+</section>
+{% endif %}
+{% endblock %}

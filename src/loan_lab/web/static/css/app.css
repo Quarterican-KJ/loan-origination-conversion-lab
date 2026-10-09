@@ -591,5 +591,47 @@ select:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px
 .subsection h4 { margin-bottom: 0.5rem; }
 .subsection .table { border: 1px solid var(--border); border-radius: 6px; }
 
+.facts .fact-wide { grid-column: 1 / -1; }
+.panel-footnote { padding: 0 1rem 0.75rem; }
+
+/* ---------- Conversion runs ---------- */
+
+.run-id { font-size: 0.85rem; }
+.hash { font-size: 0.8rem; color: var(--text-muted); }
+.tabs { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.table td.wrap { white-space: normal; min-width: 14rem; overflow-wrap: anywhere; }
+.problems { margin: 0.4rem 0 0; padding-left: 1.25rem; }
+.timestamp { white-space: nowrap; }
+.table th .th-note { display: block; font-size: 0.7rem; font-weight: 500; text-transform: none; letter-spacing: 0; color: var(--text-faint); }
+.term { cursor: help; text-decoration: underline dotted; text-underline-offset: 0.2em; }
+.definitions { display: grid; grid-template-columns: max-content 1fr; gap: 0.2rem 0.75rem; margin: 0; padding: 0.6rem 1rem 0.75rem; border-top: 1px solid var(--border); color: var(--text-faint); font-size: 0.8rem; }
+.definitions > div { display: contents; }
+.definitions dt { font-weight: 600; color: var(--text-muted); }
+.definitions dd { margin: 0; }
+
+.notice-danger { border-left-color: var(--danger); background: var(--danger-soft); }
+.notice-success { border-left-color: var(--success); background: var(--success-soft); }
+.notice-warning-inline { border-left-color: var(--warning); background: var(--warning-soft); }
+
+.run-status-loaded,
+.run-status-loading,
+.run-status-validated,
+.run-status-started { background: var(--accent-soft); color: var(--accent-strong); }
+.run-status-reconciled { background: var(--success-soft); color: var(--success); }
+.run-status-failed { background: var(--danger-soft); color: var(--danger); }
+.run-status-unknown,
+.run-status-unrecognized { background: var(--warning-soft); color: var(--warning); }
+
+.condition-reconciled,
+.result-pass { background: var(--success-soft); color: var(--success); }
+.condition-loaded { background: var(--accent-soft); color: var(--accent-strong); }
+.condition-failed,
+.result-fail { background: var(--danger-soft); color: var(--danger); }
+.condition-unknown,
+.condition-in_progress { background: var(--warning-soft); color: var(--warning); }
+.condition-untrusted,
+.condition-unavailable,
+.result-unverified { background: transparent; border: 1px dashed var(--warning); color: var(--warning); }
+
 .error-panel { padding: 1.5rem; display: flex; flex-direction: column; gap: 0.5rem; max-width: 720px; }
 .error-panel .hint { color: var(--text-muted); }

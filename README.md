@@ -79,6 +79,9 @@ Then open:
 | Dashboard: counts, requested volume, product and status breakdowns | <http://127.0.0.1:8000/> |
 | Application directory: search, product/status filters, pagination | <http://127.0.0.1:8000/applications> |
 | Application detail: terms, parties, collateral, appraisals, liens | <http://127.0.0.1:8000/applications/1> |
+| Conversion runs found in `output\conversion` | <http://127.0.0.1:8000/conversions> |
+| Conversion run summary: status, source checksums, row dispositions, totals, warnings | <http://127.0.0.1:8000/conversions/manual-check-1> |
+| Reconciliation: RC-01 to RC-10 and field-level discrepancies | <http://127.0.0.1:8000/conversions/manual-check-1/reconciliation> |
 | Health check → `{"status":"ok"}` | <http://127.0.0.1:8000/health> |
 | Interactive API docs | <http://127.0.0.1:8000/docs> |
 
@@ -94,7 +97,15 @@ Notes:
 - **Theme.** Dark by default; use the sun/moon button in the top bar to switch. The choice is
   saved in the browser's local storage.
 - Collateral without an appraisal shows its value as **Unknown**, never `$0`.
-- No authentication, editing, workflow transitions, or conversion yet.
+- **Conversion Management** reads each run's `manifest.json`, `reports\load_result.json`, and
+  `reports\reconciliation.json` (see [Convert the sample legacy extract](#convert-the-sample-legacy-extract)).
+  It never opens a conversion database or `loan_lab_dev.db` and never writes evidence. Missing
+  evidence shows as **Not available**, never zero or PASS. Each run shows its recorded status
+  and, separately, whether the evidence is trusted. Incomplete, conflicting, or unverified
+  evidence is labeled **Untrusted evidence**, whatever the recorded status. A reconciled run is
+  shown as "Reconciled · awaiting release approval", never as released.
+- No authentication, editing, workflow transitions, approvals, or conversion execution from the
+  browser yet.
 
 ## Generate synthetic data
 
@@ -215,8 +226,8 @@ python -m pytest
 ## Status
 
 Implemented: the `GET /health` endpoint, the LOS data model (borrowers, applications, parties,
-collateral, pledges, liens), the synthetic data generator, a read-only LOS web interface, and
-legacy conversion validation, mapping, transactional loading with per-run evidence, and
-independent reconciliation. Not yet implemented: authentication, editing, database migrations,
+collateral, pledges, liens), the synthetic data generator, a read-only LOS web interface with
+read-only Conversion Management pages, and legacy conversion validation, mapping, transactional
+loading with per-run evidence, and independent reconciliation. Not yet implemented: authentication, editing, database migrations,
 workflow validation, and release approval. See
 [docs/architecture.md](docs/architecture.md) for the design and its current limitations.

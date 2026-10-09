@@ -1,0 +1,102 @@
+{# Shared conversion macros. Missing evidence is always "Not available", never zero or PASS. #}
+{% macro na(reason=none) -%}
+<span class="unknown" data-na{% if reason %} title="{{ reason }}"{% endif %}>Not available</span>
+{%- endmacro %}
+
+{% macro text(value) -%}
+{% if value is none %}{{ na() }}{% else %}{{ value }}{% endif %}
+{%- endmacro %}
+
+{% macro count(value) -%}
+{% if value is none %}{{ na() }}{% else %}{{ value | number }}{% endif %}
+{%- endmacro %}
+
+{% macro amount(value) -%}
+{% if value is none %}{{ na() }}{% else %}{{ value | money }}{% endif %}
+{%- endmacro %}
+
+{% macro flag(value, yes="Yes", no="No") -%}
+{% if value is none %}{{ na() }}{% elif value %}{{ yes }}{% else %}{{ no }}{% endif %}
+{%- endmacro %}
+
+{% macro hash(value) -%}
+{% if value is none %}{{ na() }}{% else %}<code class="hash" title="{{ value }}">{{ value[:12] }}…</code>{% endif %}
+{%- endmacro %}
+
+{% macro timestamp(value) -%}
+{% set shown = value | utc_timestamp %}
+{% if value is none %}{{ na() }}
+{%- elif shown is none %}{{ na("The recorded value is not a valid UTC timestamp.") }}
+{%- else %}<time class="timestamp" datetime="{{ value }}" title="{{ value }}">{{ shown }}</time>{% endif %}
+{%- endmacro %}
+
+{# Definitions for terms whose meaning is easy to misread. Headers point at them with
+   aria-describedby; each page renders a key's definition once, via definitions(). #}
+{% set TERMS = {
+  "eligible": ("Eligible to load", "Rows that passed validation and that the plan loads into the target database."),
+  "loaded": ("Loaded", "Rows written to the target database."),
+  "excluded": ("Excluded", "Valid rows intentionally not converted under an exclusion rule (EX), including rows that depend on an excluded row."),
+  "rejected": ("Rejected", "Rows not converted because they failed a source validation rule (SV), including rows that depend on a rejected row."),
+  "expected": ("Expected by the plan", "Records the validated conversion plan intended to load, computed before loading."),
+  "read-back": ("Read back after the load", "Records the loader counted in the conversion database after committing, as recorded in reports/load_result.json."),
+  "checked": ("Items checked", "Comparisons made by that rule. Each rule counts its own items (rows, fields, relationships, or totals), so this is not necessarily a count of distinct source records."),
+} %}
+
+{% macro term(key, label=none) -%}
+<span class="term" title="{{ TERMS[key][1] }}" aria-describedby="term-{{ key }}">{{ label or TERMS[key][0] }}</span>
+{%- endmacro %}
+
+{% macro definitions(keys) -%}
+<dl class="definitions" data-definitions>
+  {% for key in keys %}<div><dt>{{ TERMS[key][0] }}</dt><dd id="term-{{ key }}">{{ TERMS[key][1] }}</dd></div>{% endfor %}
+</dl>
+{%- endmacro %}
+
+{% macro label_or_na(value) -%}
+{% if value is none %}{{ na() }}{% else %}{{ value | label }}{% endif %}
+{%- endmacro %}
+
+{% macro status_badge(run) -%}
+{% if run.status is none %}<span class="badge run-status-unrecognized" data-run-status="">Status not available</span>
+{%- elif run.status_recognized %}<span class="badge run-status-{{ run.status | lower }}" data-run-status="{{ run.status }}">{{ run.status }}</span>
+{%- else %}<span class="badge run-status-unrecognized" data-run-status="unrecognized" title="{{ run.status }}">Unrecognized status</span>
+{%- endif %}
+{%- endmacro %}
+
+{% macro condition_badge(run) -%}
+<span class="badge condition-{{ run.condition.value }}" data-condition="{{ run.condition.value }}">{{ run.condition_label }}</span>
+{%- endmacro %}
+
+{% macro rule_result(result, verified) -%}
+{% if result is none %}{{ na() }}
+{%- elif not verified %}<span class="badge result-unverified" data-result="{{ result }}-unverified">{{ result }} (unverified)</span>
+{%- elif result == "PASS" %}<span class="badge result-pass" data-result="PASS">PASS</span>
+{%- else %}<span class="badge result-fail" data-result="FAIL">FAIL</span>
+{%- endif %}
+{%- endmacro %}
+
+{% macro run_header(run, current, success_notice=true) -%}
+<div class="page-header">
+  <div>
+    <h1><span>Run <code class="run-id">{{ run.run_id }}</code></span> {{ status_badge(run) }} {{ condition_badge(run) }}</h1>
+    <p class="muted">Read-only view of the run's recorded evidence. Nothing here approves, releases, or changes the run.</p>
+  </div>
+  <nav class="tabs" aria-label="Run views">
+    <a class="button {% if current != 'summary' %}button-ghost{% endif %}" href="{{ url_for('conversion', run_id=run.run_id) }}" {% if current == 'summary' %}aria-current="page"{% endif %}>Summary</a>
+    <a class="button {% if current != 'reconciliation' %}button-ghost{% endif %}" href="{{ url_for('conversion_reconciliation', run_id=run.run_id) }}" {% if current == 'reconciliation' %}aria-current="page"{% endif %}>Reconciliation</a>
+    <a class="button button-ghost" href="{{ url_for('conversions') }}">All runs</a>
+  </nav>
+</div>
+{% if run.problems %}
+<div class="notice notice-danger" role="alert" data-trust="untrusted">
+  <strong>This run's evidence is not trusted as a successful conversion.</strong>
+  <ul class="problems">
+    {% for problem in run.problems %}<li>{{ problem }}</li>{% endfor %}
+  </ul>
+</div>
+{% elif run.condition.value == "reconciled" and success_notice %}
+<div class="notice notice-success" role="status" data-trust="reconciled">
+  Every reconciliation rule passed and the evidence agrees. The run awaits a separate release approval; it has <strong>not</strong> been released.
+</div>
+{% endif %}
+{%- endmacro %}

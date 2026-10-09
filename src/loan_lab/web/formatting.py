@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
-from datetime import date
+import re
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from enum import StrEnum
 
 UNKNOWN = "Unknown"
+
+# Evidence timestamps are ISO 8601 in UTC, written as ...Z (or +00:00).
+_UTC_TIMESTAMP = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|\+00:00)", re.ASCII
+)
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
+           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
 _LABEL_OVERRIDES = {
     "co_borrower": "Co-borrower",
@@ -35,6 +43,20 @@ def rate(value: Decimal | None) -> str:
 
 def iso_date(value: date | None) -> str:
     return UNKNOWN if value is None else value.isoformat()
+
+
+def utc_timestamp(value: object) -> str | None:
+    """'Oct 9, 2026 · 7:47 PM UTC' for a valid UTC evidence timestamp; None for anything else."""
+    if not isinstance(value, str) or not _UTC_TIMESTAMP.fullmatch(value):
+        return None
+    try:
+        moment = datetime.fromisoformat(value).astimezone(UTC)
+    except ValueError:
+        return None
+    hour = moment.hour % 12 or 12
+    meridiem = "AM" if moment.hour < 12 else "PM"
+    return (f"{_MONTHS[moment.month - 1]} {moment.day}, {moment.year} · "
+            f"{hour}:{moment.minute:02d} {meridiem} UTC")
 
 
 def number(value: int) -> str:
@@ -68,4 +90,5 @@ FILTERS = {
     "percent": percent,
     "label": label,
     "term": term,
+    "utc_timestamp": utc_timestamp,
 }
