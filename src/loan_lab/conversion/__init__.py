@@ -1,1 +1,1 @@
-"""Legacy loan-data extract, transform, and load steps (not yet implemented)."""
+"""Legacy loan-data conversion. ``loan_lab.conversion.legacy`` builds the conversion plan."""

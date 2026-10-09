@@ -23,8 +23,10 @@ A Python learning lab that simulates two things found in banking technology:
 ├── .env.example             # Template for local environment settings
 ├── docs/
 │   ├── architecture.md      # System design: mock LOS + conversion engine
+│   ├── conversion-specification.md  # Legacy CSV conversion data contract (draft)
 │   └── learning-log.md      # Notes on Python and loan origination concepts
 ├── data/                    # Local SQLite databases (git-ignored, created on demand)
+├── sample_data/legacy/      # Small synthetic legacy CSV extract for the conversion spec
 ├── src/
 │   └── loan_lab/
 │       ├── main.py          # FastAPI app factory (GET /health + web interface)

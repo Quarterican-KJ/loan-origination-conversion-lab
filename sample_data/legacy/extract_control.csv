@@ -1,0 +1,4 @@
+FILE_NAME,RECORD_COUNT,AMOUNT_TOTAL,EXTRACT_DATE
+borrowers.csv,16,,20260930
+applications.csv,13,5467000.00,20260930
+application_parties.csv,20,,20260930

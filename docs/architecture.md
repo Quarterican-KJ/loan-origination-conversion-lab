@@ -54,6 +54,29 @@ Moves data from the legacy format into the LOS schema in stages:
 2. **Transform** — map legacy field names, codes, and formats (dates, amounts, status codes) to the LOS model.
 3. **Load** — write transformed records into the LOS database, ideally inside a transaction per batch.
 
+The source data contract for the first conversion (borrowers, applications, and party
+relationships from a fictional legacy CSV extract) is defined in
+[conversion-specification.md](conversion-specification.md). Sample files are in
+`sample_data/legacy/`.
+
+**Phase 1 (implemented): planning only.** `loan_lab.conversion.legacy` reads an extract, validates
+it, and produces an immutable `ConversionPlan`. It never opens a database.
+
+| Module | Responsibility |
+| --- | --- |
+| `contract.py` | File layouts, code tables, formats, and stable rule codes, expressed as data |
+| `source.py` | Reads the files and applies the run-level checks (RUN-01 to RUN-06). Raises `SourceValidationError` so nothing is planned from a bad extract. |
+| `transforms.py` | Pure, exact conversions: names, amounts, rates, terms |
+| `planner.py` | Record-level stages in spec order: structure, duplicates, exclusions, source checks, mapping, references, conversion units, warnings |
+| `plan.py` | Frozen result types. Every source row gets one disposition, a dependent flag, rule codes, root causes, its raw line, and its mapped target values. Also holds conversion units, amount totals by disposition, and the unmapped-field inventory. |
+
+```powershell
+python -c "from pathlib import Path; from loan_lab.conversion.legacy import plan_conversion; p = plan_conversion(Path('sample_data/legacy')); print(p.amounts)"
+```
+
+Loading, reconciliation, run reports, and release approval are not implemented. RUN-07 (empty
+target database) is a future loader precondition and is not evaluated in Phase 1.
+
 ### Validation (`loan_lab.validation`)
 
 Rules applied between transform and load, for example: required fields present, dates parse correctly, amounts are non-negative, codes map to known values. Failed records go to an exception report rather than the database.
@@ -473,6 +496,7 @@ Server-rendered pages over the development database (`data/loan_lab_dev.db`):
 Implemented: the application skeleton, `GET /health`, and the LOS data model (`Borrower`,
 `LoanApplication`, `ApplicationParty`, `Collateral`, `CollateralPledge`, `Lien`) with exact decimal
 storage, the deterministic synthetic data generator (`loan_lab.synthetic`), and a read-only
-web interface (`loan_lab.web`). Not yet implemented: authentication, editing, database
-migrations, workflow validation and status transitions, collateral policy and LTV, conversion
-stages, and reconciliation.
+web interface (`loan_lab.web`), and phase 1 of the legacy conversion (validation and mapping into
+a conversion plan, `loan_lab.conversion.legacy`). Not yet implemented: authentication, editing,
+database migrations, workflow validation and status transitions, collateral policy and LTV,
+conversion loading, reconciliation, and release approval.
