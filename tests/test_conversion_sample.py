@@ -176,6 +176,15 @@ def test_root_causes_point_to_the_originating_lines(plan: ConversionPlan) -> Non
     assert causes(PARTIES, 18) == ["EX-03 applications.csv:12"]
 
 
+def test_unit_keys_follow_spec_section_13(plan: ConversionPlan) -> None:
+    for line, (appl_no, _, _) in EXPECTED_APPLICATIONS.items():
+        assert plan.row(SourceRef(APPLICATIONS, line)).unit_key == appl_no
+    for line, (key, _, _) in EXPECTED_PARTIES.items():
+        expected = None if line == 21 else key.split("/")[0]
+        assert plan.row(SourceRef(PARTIES, line)).unit_key == expected
+    assert {row.unit_key for row in plan.borrowers} == {None}
+
+
 def test_rejected_rows_keep_their_raw_source_line(plan: ConversionPlan) -> None:
     row = plan.row(SourceRef(PARTIES, 16))
 

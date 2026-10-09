@@ -627,6 +627,79 @@ def test_relationship_to_missing_application(tmp_path: Path) -> None:
     assert plan.units[0].disposition is Disposition.ELIGIBLE
 
 
+@pytest.mark.parametrize(
+    ("applications", "parties", "outcome", "expected_rules"),
+    [
+        ((application(),), BASE_PARTIES, Outcome.LOAD_ELIGIBLE, []),
+        ((application(product="330"),), BASE_PARTIES, Outcome.EXCLUDED, ["EX-02"]),
+        ((application(status="X"),), BASE_PARTIES, Outcome.EXCLUDED, ["EX-03"]),
+        ((application(amount="0.00"),), BASE_PARTIES, Outcome.REJECTED, ["MP-02"]),
+        ((application(),), (party(role="COB"),), Outcome.REJECTED, ["RF-06"]),
+        ((application(),), (party(), party(cust="00000099", role="GTR")),
+         Outcome.REJECTED, ["RF-07"]),
+    ],
+)
+def test_application_row_carries_its_unit_key(
+    tmp_path: Path,
+    applications: tuple[str, ...],
+    parties: tuple[str, ...],
+    outcome: Outcome,
+    expected_rules: list[str],
+) -> None:
+    plan = plan_for(tmp_path, applications=applications, parties=parties)
+
+    head = result(plan, APPLICATIONS)
+    assert (head.outcome, rules(plan, APPLICATIONS)) == (outcome, expected_rules)
+    assert head.unit_key == "0000000001"
+    assert [unit.key for unit in plan.units] == ["0000000001"]
+    assert {row.unit_key for row in plan.parties} == {"0000000001"}
+    assert {row.unit_key for row in plan.borrowers} == {None}
+
+
+def test_duplicate_application_rows_share_their_unit_key(tmp_path: Path) -> None:
+    plan = plan_for(tmp_path, applications=(application(), application(amount="5.00")))
+
+    assert [result(plan, APPLICATIONS, line).unit_key for line in (2, 3)] == [
+        "0000000001", "0000000001",
+    ]
+    assert rules(plan, APPLICATIONS, 3) == ["SV-09"]
+
+
+@pytest.mark.parametrize("appl", ["1", "000000001", "00000000001", "000000000A", " 0000000001"])
+def test_malformed_application_number_is_its_unit_key_unpadded(
+    tmp_path: Path, appl: str
+) -> None:
+    plan = plan_for(
+        tmp_path,
+        applications=(application(appl),),
+        parties=(party(appl), party(appl, cust="00000002", role="GTR")),
+    )
+
+    head = result(plan, APPLICATIONS)
+    assert rules(plan, APPLICATIONS) == ["SV-03"]
+    assert head.key == head.unit_key == appl
+    assert [unit.key for unit in plan.units] == [appl]
+    # The relationship rows name the same exact text, so they join that unit; nothing is padded.
+    assert {row.unit_key for row in plan.parties} == {appl}
+    assert all(rules(plan, PARTIES, line) == ["SV-03"] for line in (2, 3))
+
+
+@pytest.mark.parametrize(
+    ("line", "rule"),
+    [("0000000001,310,S", "SV-01"), (application(""), "SV-02")],
+)
+def test_application_row_without_a_readable_key_has_no_unit_key(
+    tmp_path: Path, line: str, rule: str
+) -> None:
+    plan = plan_for(tmp_path, applications=(line,))
+
+    head = result(plan, APPLICATIONS)
+    assert rule in rules(plan, APPLICATIONS)
+    assert (head.key, head.unit_key) == ("", None)
+    assert plan.units == ()
+    assert all(rules(plan, PARTIES, line) == ["RF-01"] for line in (2, 3))
+
+
 def test_missing_customer_rejects_the_unit_without_a_placeholder(tmp_path: Path) -> None:
     plan = plan_for(tmp_path, parties=(party(), party(cust="00000099", role="GTR")))
 

@@ -92,7 +92,8 @@ class RowResult:
     # CUST_NO, APPL_NO, or APPL_NO/CUST_NO exactly as extracted ("" if the row was unreadable).
     key: str
     raw: str
-    # APPL_NO of the conversion unit a party or application row belongs to.
+    # APPL_NO of the conversion unit a party or application row belongs to, as exact source text.
+    # None for borrower rows and for rows in no unit (unreadable, blank APPL_NO, or RF-01).
     unit_key: str | None
     disposition: Disposition
     dependent: bool

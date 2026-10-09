@@ -3,7 +3,8 @@
 Reserves output/conversion/<run_id>/, archives the extract there, validates and plans it, and
 loads it into a new database under data/conversion/<run_id>/, recording the run's evidence
 (manifest, archived source, load report) as it goes.
-Reconciliation and release approval are not implemented yet.
+Reconciliation is a separate step (python -m loan_lab.conversion.legacy.reconcile_cli <run_id>).
+Release approval is not implemented yet.
 """
 
 import argparse
@@ -120,7 +121,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  Requested amount loaded: {run.database.requested_amount}")
     standalone = ", ".join(result.borrowers_without_relationships) or "none"
     print(f"  Customers without a converted application (WN-01): {standalone}")
-    print("  Reconciliation has not run; this run is not releasable.")
+    print("  Reconciliation has not run; this run is not releasable. Reconcile it with:")
+    print(f"  python -m loan_lab.conversion.legacy.reconcile_cli {run_id}")
     return EXIT_OK
 
 

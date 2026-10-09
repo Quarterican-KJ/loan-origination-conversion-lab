@@ -9,12 +9,13 @@ each other, and how the result is reconciled.
 > `sample_data/legacy/` are invented for this lab. They do not describe any real vendor product,
 > core-banking system, institution, or person.
 
-**Status:** stages 1–3 are implemented in `loan_lab.conversion.legacy`: source validation and
-mapping into a conversion plan (Phase 1), and target loading with its run evidence (Phase 2:
+**Status:** stages 1–4 are implemented in `loan_lab.conversion.legacy`: source validation and
+mapping into a conversion plan (Phase 1), target loading with its run evidence (Phase 2:
 `manifest.json`, the verified source archive, and `reports/load_result.json`), including evidence
 for source-validation failures and read-only recovery of runs whose evidence is incomplete
-(sections 2.2 and 13). Reconciliation, the exception and exclusion reports, and release approval
-are not implemented yet. Nothing in this document changes the
+(sections 2.2 and 13), and independent reconciliation (Phase 3: RC-01 to RC-10 and
+`reports/reconciliation.json`, section 12.1). The exception and exclusion reports and release
+approval are not implemented yet. Nothing in this document changes the
 existing SQLAlchemy models or the seeded development database.
 
 ## Contents
@@ -103,7 +104,7 @@ happens to the run.
 | **Record rejection** | One source row, or one conversion unit (section 8.2) | A record rule (SV, MP, or RF) | That row, or that unit, is not loaded. Other records continue. | None by itself. The run can still pass. | `exceptions.csv` |
 | **Intentional exclusion** | One source row | An exclusion rule (EX) | The row is not loaded. This is not an error. | None | `exclusions.csv` |
 | **Load failure** | Whole load | The RUN-07 or RUN-08 precondition (section 9.1), or a database or converter error during schema creation, insert, or commit | RUN-07 and RUN-08: nothing is written to any existing file or database. Otherwise the transaction rolls back, so no converted rows are committed. | `FAILED` at stage `load`, or `UNKNOWN` if the database does not confirm the rollback | `manifest.json` and `reports/load_result.json` with the failing step, the error, the planned counts and amount, transaction states, and the rows found in the database afterwards |
-| **Reconciliation failure** | Whole run | Any reconciliation rule (RC-01 to RC-10) does not match | Committed rows are **kept unchanged** for troubleshooting but cannot be released. | `FAILED` at stage `reconciliation` | `reconciliation.md` with expected and actual values |
+| **Reconciliation failure** | Whole run | Any reconciliation rule (RC-01 to RC-10) does not match | Committed rows are **kept unchanged** for troubleshooting but cannot be released. | `FAILED` at stage `reconciliation` | `reports/reconciliation.json` with a discrepancy record (rule, source file, line and key, target table and ID, field, expected and actual values) for every mismatch |
 | **Release approval** | Whole run | A named reviewer's sign-off after reconciliation passes | The conversion database is accepted as the run's output. | `RELEASED` | Approval record in the run manifest |
 
 Record rejections and exclusions are expected parts of a successful run. A run whose records are
@@ -145,10 +146,11 @@ never happened:
 
 | Manifest field | Values | Meaning |
 | --- | --- | --- |
-| `status` | `STARTED`, `VALIDATED`, `LOADING`, `LOADED`, `FAILED`, `UNKNOWN` | Where the run is in its lifecycle |
+| `status` | `STARTED`, `VALIDATED`, `LOADING`, `LOADED`, `RECONCILED`, `FAILED`, `UNKNOWN` (`RELEASED` and `DECLINED` once release approval exists) | Where the run is in its lifecycle |
 | `database_transaction` | `not_started`, `in_progress`, `committed`, `rolled_back`, `not_committed`, `unknown` | Whether business rows were committed. `not_committed` and `unknown` are established by read-only inspection. |
 | `evidence.state` | `in_progress`, `complete`, `incomplete`, `unverified` | Whether the manifest and report fully describe the database |
-| `ready_for_reconciliation` | `true` or `false` | `true` only for `LOADED` with `committed` and `complete` evidence |
+| `ready_for_reconciliation` | `true` or `false` | `true` only for `LOADED` with `committed` and `complete` evidence, and no reconciliation attempt recorded |
+| `reconciliation.state` | absent, `in_progress`, `unfinalized`, `conflict`, `final` | Where reconciliation's own evidence stands (section 12.2). The status stays `LOADED` until `final`. |
 
 - `LOADING` is written **before** the load starts. If the run stops at any point after that, the
   manifest says `LOADING`, never `VALIDATED`, so a load that may have happened is never hidden.
@@ -174,11 +176,14 @@ never happened:
 - `UNKNOWN` means the outcome could not be verified; it is reported rather than guessed. An
   `UNKNOWN` run is never ready for reconciliation. It is closed by **formally failing** it
   (`fail_run`), which records `FAILED` with step `formally_failed` and leaves the database and
-  `database_transaction` untouched. A final run (`LOADED` or `FAILED`) is never changed by recovery
-  or by `fail_run`.
+  `database_transaction` untouched. A settled run (`LOADED`, `RECONCILED`, or `FAILED`) is never
+  changed by recovery or by `fail_run`; only reconciliation moves a `LOADED` run on. The one
+  exception: `fail_run` can formally fail a `LOADED` run whose reconciliation is `in_progress`,
+  `unfinalized`, or `conflict`, at stage `reconciliation`, keeping all its evidence (section 12.2).
 - `check_ready` confirms a run may proceed to reconciliation: status `LOADED`, transaction
-  `committed`, evidence `complete`, the ready flag set, the source archive verified, a successful
-  load report for the run, and a database whose SHA-256 still equals the recorded one.
+  `committed`, evidence `complete`, the ready flag set, no reconciliation attempt recorded, the
+  source archive verified, a successful load report for the run, and a database whose SHA-256
+  still equals the recorded one.
 
 ### 2.3 Release approval
 
@@ -775,6 +780,124 @@ between the target and the WN-01 list does.
   and a **new run** loads into a new database. The failed run's evidence stays available for
   comparison until it is deliberately removed.
 
+### 12.1 Implementation
+
+`reconcile_run(run_id)` (module `reconcile.py`; command line
+`python -m loan_lab.conversion.legacy.reconcile_cli <run_id>`) reconciles one `LOADED` run.
+
+**Preconditions.** Reconciliation is **refused**, with nothing written and the status unchanged,
+when:
+
+- `check_ready` reports any problem (section 2.2): the run is not `LOADED` with a committed
+  transaction, complete evidence, a verified source archive, and a successful load report;
+- an archived source file is missing or its SHA-256 differs from the planned and archived
+  checksums in the manifest;
+- the database's SHA-256 differs from the one recorded when it was loaded, before or after it is
+  read, or a `-journal` or `-wal` file sits beside it.
+
+**Independence.** What each part of the comparison is built from:
+
+| Input | Source | Shared with the converter |
+| --- | --- | --- |
+| Source rows and control totals | The archived files, read again by the reconciler's own reader (section 3 dialect) | File names and header layouts only |
+| Expected target values | Recomputed from the raw source text with the reconciler's own code tables (section 5) and transformations (section 7). `T-RATE` is rebuilt from the digits (`006500` → `6.5000`). Amounts are `Decimal`; no `float` is ever used. | Nothing. The conversion plan's mapped values are never read. |
+| Target values | A raw SQLite connection opened `mode=ro` with `PRAGMA query_only`. Amounts and rates are read as their stored scaled integers and converted with `Decimal`; a value that is not an integer is a discrepancy. | Nothing; the ORM is not used. |
+| Dispositions (which rows should be loaded) | The archived files re-validated with the Phase 1 rules | The validation rules. Cross-checked: an excluded row must meet an exclusion criterion judged from its raw text, a loaded row must meet none, a rejected row must meet none unless SV-01, SV-09, or SV-10 rejected it (section 9.6), and every loaded row must pass the reconciler's own validation and transformations (RC-01, RC-07). |
+
+**Remaining independence limits.** Reconciliation proves the target matches the dispositions; it
+cannot fully prove the dispositions themselves:
+
+- A **valid row wrongly rejected** by the planner (for example, a term-range defect that rejects a
+  60-month application) reconciles cleanly: the row is not expected in the target and is not
+  there. Only rejected rows that meet an exclusion criterion are cross-checked.
+- A wrong **rule code or root cause** on a rejected row is not checked, because rejected rows have
+  no target values to compare.
+- The exclusion cross-check judges criteria from the reconciler's own copy of the code lists. A
+  scope decision that is wrong in both copies goes unnoticed.
+- For the sample extract, `tests/test_conversion_spec_acceptance.py` closes these gaps: it holds
+  hand-transcribed section 15 constants for all 13 applications (disposition, rule codes,
+  root-cause class and originating lines, unit membership, `REQ_AMT`, loaded relationships) and
+  checks both the planner and the loaded target against them. It includes injected planner
+  defects that must fail it. For any other extract, those guarantees depend on review of the
+  exception report.
+
+**Checks per rule.** Each discrepancy carries a stable rule code and a stable `check` name:
+
+| Rule | Checks (`check`) |
+| --- | --- |
+| RC-01 | Every line read has one disposition (`rows_not_accounted`, `disposition_total`, `no_disposition`, `key_mismatch`); exclusions agree with their criteria (`exclusion_without_criterion`, `loaded_despite_exclusion`, `rejected_despite_exclusion`); loaded counts agree with the load's expected target (`load_plan_count`) |
+| RC-02 | `record_count`, `control_amount` (or a note when unverifiable), `extract_date`, and malformed, duplicate, or missing control rows |
+| RC-03 | `row_count` for `borrower`, `loan_application`, and `application_party` rows on converted applications |
+| RC-04 | `missing_key`, `unexpected_key` (with the source row's own disposition, if it exists), `duplicate_key`, `duplicate_source_key`, and `foreign_row` (a row not from `LEGACY_LOS`) |
+| RC-05 | `loaded_amount_total`, `disposition_amount_total`, `load_plan_amount`, and `stored_amount_invalid` |
+| RC-06 | `distribution` for each product, status, borrower type, and role value |
+| RC-07 | `field_mismatch` for `source_system`, `borrower_type`, `legal_name`, `loan_product`, `status`, `requested_amount`, `interest_rate`, and `term_months` on every loaded record; `source_not_convertible` when a loaded row fails independent validation |
+| RC-08 | `missing_relationship`, `unexpected_relationship`, `role_mismatch`, `duplicate_relationship`, `rejected_relationship_on_loaded_application`, `relationship_borrower_unknown`, `relationship_on_unloaded_application`, `relationship_without_application`, `source_role_unmapped` |
+| RC-09 | `primary_borrower_count` for every converted application |
+| RC-10 | `standalone_customer_related`, `unexpected_standalone_customer`, and `warning_list_mismatch` (the WN-01 list disagrees with the loaded customers that have no loaded relationship) |
+
+**Outcome.** Once finalized (section 12.2):
+
+- every rule passes: status `RECONCILED`, `reconciliation.release_review: awaiting_approval`;
+- any discrepancy: status `FAILED`, failure stage `reconciliation` (step `reconcile`, the first
+  failing rule, and the discrepancy count), `reconciliation.release_review: blocked`.
+
+In both cases the database, the source archive, and the load report are unchanged, `release`
+stays empty, and the run is never released or declined automatically.
+
+### 12.2 Reconciliation evidence and recovery
+
+A report on disk never stands for a reconciled run by itself. Only a manifest with status
+`RECONCILED` and `reconciliation.state: final` does, and it records the report's SHA-256.
+Finalization has three steps:
+
+1. The manifest records the attempt: `reconciliation.state: in_progress`, a random `attempt` ID,
+   and `ready_for_reconciliation: false`. The status stays `LOADED`.
+2. `reports/reconciliation.json` is written atomically and carries the same `attempt`.
+3. The manifest is finalized: `state: final`, `attempt`, `report_sha256`, the result, and the new
+   status.
+
+| What fails | Recorded | Effect |
+| --- | --- | --- |
+| Writing the attempt marker | Nothing | Status `LOADED`, still ready; reconcile again |
+| Writing the report | The marker is undone; the manifest is restored byte for byte | Status `LOADED`, still ready; no report; reconcile again |
+| Finalizing the manifest | `state: unfinalized`, with `report_sha256`, `result`, and the error (best effort) | Status `LOADED`, **not ready, not reconciled**; the provisional report is kept; `ReconciliationNotFinalizedError` (command line exit 10) |
+| Recording `unfinalized` too, or an interruption after the report | `state: in_progress` remains | As above |
+
+**Retry.** `reconcile_run` on a run whose state is `in_progress` or `unfinalized` is the
+recovery path. Before finalizing anything it:
+
+1. re-checks the load evidence (status `LOADED`, committed transaction, complete evidence,
+   verified archive, successful load report), the archived source checksums, and the database
+   checksum, and refuses with nothing written if any differ;
+2. re-runs the full comparison against the read-only database;
+3. if the report exists, requires that its SHA-256 equals the recorded `report_sha256` (when
+   recorded), that its `attempt` is the recorded attempt, and that it is identical to what the
+   fresh comparison would write, apart from `generated_at`. Only then is the manifest finalized,
+   **without rewriting the report**, and `finalized_by_retry_at` is recorded;
+4. if no report exists and the state is `in_progress`, the report was never written, so a new
+   attempt starts.
+
+**Conflicts.** Contradictory evidence is never overwritten. Reconciliation records
+`state: conflict` with the problems and the existing report's SHA-256 (best effort), keeps the
+status `LOADED` and not ready, and raises `ReconciliationConflictError` (command line exit 9) when:
+
+- a report exists but the manifest records no attempt;
+- the provisional report is unreadable, belongs to another attempt, does not match its recorded
+  checksum, or differs from a fresh comparison of the same evidence;
+- the manifest records an `unfinalized` report that no longer exists.
+
+A conflict is sticky: reconciling again raises the same error. The operator investigates and
+closes the run with `fail_run`, which records `FAILED` at stage `reconciliation` and keeps the
+report and manifest record as they are. A new run then converts the extract again.
+
+**Verification.** `verify_reconciliation(run_id)` re-checks a `RECONCILED` run read-only. It
+checks that the status and `state: final` are recorded with a passed result and no release, that
+the report matches the recorded SHA-256, attempt, and run, and records PASS, that the report,
+manifest, and load agree on the database SHA-256, that the database still matches it, and that
+the archived source still matches both the manifest and the report. Verification is not release
+approval.
+
 ## 13. Exception and run reports
 
 Every run writes its evidence to its own directory, `output/conversion/<run_id>/`, which Git
@@ -783,14 +906,14 @@ directory is overwritten by a later run.
 
 | File | Contents |
 | --- | --- |
-| `manifest.json` | Run ID; start, last-update, and end times (UTC); status, database transaction state, evidence state, and readiness for reconciliation (section 2.2); failure (stage, step, rule, reason), if any; specification version; source directory; for each source file the planned, read, and archived SHA-256, its size, and whether they agree; validation summary (control totals, row counts by disposition, requested amounts by disposition), or the run-level issues if validation failed; expected target counts and amount; the conversion database's path, tables, and SHA-256; load outcome; reconciliation and release approval records (empty until implemented) |
+| `manifest.json` | Run ID; start, last-update, and end times (UTC); status, database transaction state, evidence state, and readiness for reconciliation (section 2.2); failure (stage, step, rule, reason), if any; specification version; source directory; for each source file the planned, read, and archived SHA-256, its size, and whether they agree; validation summary (control totals, row counts by disposition, requested amounts by disposition), or the run-level issues if validation failed; expected target counts and amount; the conversion database's path, tables, and SHA-256; load outcome; the reconciliation record (result, report, time, database SHA-256, failed rules, discrepancy count, and whether release review is awaiting approval or blocked); the release approval record (empty until implemented) |
 | `source/` | Byte-for-byte copies of the source files that could be read, verified against the plan (RUN-08) when one exists |
 | `reports/load_result.json` | Written once a load was attempted. The load outcome: success, failure, or unverified; expected counts and amount, the counts and requested amount **read back from the database** afterwards (amounts as decimal strings), rows inserted, the state of the schema and load transactions, whether any business rows were committed, the database checksum, and the failing step and error |
 | `exceptions.csv` | Record rejections |
 | `exclusions.csv` | Intentional exclusions |
 | `warnings.csv` | Warnings (WN-01) |
 | `unmapped_fields.csv` | The inventory of intentionally unmapped fields (section 6.1) |
-| `reconciliation.md` | Results for RC-01 to RC-10, with expected and actual values, the customers without converted applications, and a final PASS or FAIL |
+| `reports/reconciliation.json` | Results for RC-01 to RC-10 (items checked, discrepancies, notes); row totals by disposition; requested amounts (source, control, loaded, excluded, rejected, target) as decimal strings; expected and actual distributions; expected and actual (`CUST_NO`, role) sets for every loaded application; the customers without converted applications with their relationships' dispositions; every discrepancy; a final PASS or FAIL; and the `attempt` ID that the manifest's finalized record must match (section 12.2). It is never overwritten once written. |
 | `run.log` | Stage-by-stage log, including the database error for a load failure |
 
 A source-file validation failure produces `manifest.json` and `source/` only (plus `run.log` once
@@ -810,7 +933,8 @@ created**.
 - `manifest.json` is first written with status `STARTED` (or `VALIDATED`, when a pre-built plan
   is loaded), updated after the source archive and validation, set to `LOADING` before the load
   starts, and finally set to `LOADED` (only after the load commits and the report is written),
-  `FAILED`, or `UNKNOWN` (section 2.2).
+  `FAILED`, or `UNKNOWN` (section 2.2). Reconciliation records its attempt, then sets
+  `RECONCILED` or `FAILED` (sections 12.1 and 12.2).
   Reports and the manifest are written to a temporary file in the same directory, flushed to disk,
   and then atomically renamed over the previous version, so a reader never sees a partial file and
   an interrupted write leaves the previous version intact. They are only ever replaced inside the
@@ -829,8 +953,8 @@ created**.
   what recovery found under `recovered`.
 
 Not yet implemented: `exceptions.csv`, `exclusions.csv`, `warnings.csv`, `unmapped_fields.csv`,
-`reconciliation.md`, and `run.log`. Recovery and formal failure are library functions only; there
-is no command-line entry point for them yet.
+and `run.log`. Recovery and formal failure are library functions only; there is no command-line
+entry point for them yet.
 
 **`exceptions.csv`** has one row per failure. A record with several failures has several rows.
 
@@ -839,7 +963,7 @@ is no command-line entry point for them yet.
 | `FILE_NAME` | `application_parties.csv` |
 | `LINE_NO` | `16` |
 | `SOURCE_KEY` | `0000500109/00010099` |
-| `UNIT_KEY` | `0000500109`: the conversion unit (empty for customer rows) |
+| `UNIT_KEY` | `0000500109`: the conversion unit's `APPL_NO`, as exact text (T-ID), on the application row and its relationship rows. A malformed `APPL_NO` is kept as it is, never padded. Empty for customer rows and for rows that belong to no unit: a row that cannot be read (SV-01), a blank `APPL_NO`, or a relationship to an application not in the extract (RF-01). |
 | `STAGE` | `source_validation`, `mapping`, `reference` |
 | `RULE_CODE` | `RF-02` |
 | `DEPENDENT` | `N`. `Y` means the row is rejected only because its unit was rejected. |

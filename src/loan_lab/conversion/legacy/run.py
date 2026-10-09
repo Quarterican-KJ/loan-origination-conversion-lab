@@ -13,9 +13,11 @@ committed load look as if it never happened:
 * ``fail_run`` formally fails a run that cannot or should not be recovered.
 * ``check_ready`` says whether a run's evidence allows reconciliation to start.
 
-Reconciliation and release approval are not implemented.
+Reconciliation itself lives in ``reconcile.py`` and records its outcome here. Release approval is
+not implemented.
 """
 
+import copy
 import hashlib
 import json
 import os
@@ -71,16 +73,40 @@ _TRANSACTION_FILES = ("-journal", "-wal")
 
 
 class RunStatus(StrEnum):
-    """Run status (spec section 2.2). ``LOADED``, ``FAILED`` are final for this phase."""
+    """Run status (spec section 2.2). Only reconciliation moves a run on from ``LOADED``."""
 
     STARTED = "STARTED"
     VALIDATED = "VALIDATED"
     # The load may have begun; its outcome is not yet recorded. Needs recover_run if left behind.
     LOADING = "LOADING"
     LOADED = "LOADED"
+    # Every reconciliation rule passed; awaiting a human release decision.
+    RECONCILED = "RECONCILED"
     FAILED = "FAILED"
     # Recovery could not verify whether the load committed. Needs fail_run.
     UNKNOWN = "UNKNOWN"
+
+
+# Statuses that recover_run and fail_run never change.
+_SETTLED = frozenset({RunStatus.LOADED, RunStatus.RECONCILED, RunStatus.FAILED})
+
+
+class ReconciliationState(StrEnum):
+    """``manifest.reconciliation.state`` (spec section 12.2). The status stays LOADED until FINAL."""
+
+    # Recorded before the report is written: an attempt has started and may have written one.
+    IN_PROGRESS = "in_progress"
+    # The report was written, but the manifest could not be finalized.
+    UNFINALIZED = "unfinalized"
+    # Existing reconciliation evidence contradicts the run's evidence. Needs fail_run.
+    CONFLICT = "conflict"
+    FINAL = "final"
+
+
+# A LOADED run in one of these states is neither ready nor reconciled.
+UNSETTLED_RECONCILIATION = frozenset({
+    ReconciliationState.IN_PROGRESS, ReconciliationState.UNFINALIZED, ReconciliationState.CONFLICT,
+})
 
 
 class TransactionState(StrEnum):
@@ -345,7 +371,7 @@ def recover_run(run_id: str, *, evidence_root: Path | None = None) -> RecoveryRe
     manifest = evidence.manifest
     status = RunStatus(manifest["status"])
     recorded = TransactionState(manifest["database_transaction"])
-    if status in (RunStatus.LOADED, RunStatus.FAILED):
+    if status in _SETTLED:
         return RecoveryResult(run_id, status, recorded, "The run is already final.", False)
 
     if status is RunStatus.STARTED:
@@ -371,13 +397,32 @@ def recover_run(run_id: str, *, evidence_root: Path | None = None) -> RecoveryRe
 
 
 def fail_run(run_id: str, reason: str, *, evidence_root: Path | None = None) -> None:
-    """Formally fail a non-final run (for example UNKNOWN). The database is left untouched."""
+    """Formally fail a non-final run (for example UNKNOWN). The database is left untouched.
+
+    A LOADED run whose reconciliation is unsettled (in progress, unfinalized, or in conflict) can
+    also be failed, at stage ``reconciliation``; its reconciliation evidence is kept as it is.
+    """
     evidence = _Evidence.open(_run_directory(run_id, evidence_root))
     status = RunStatus(evidence.manifest["status"])
-    if status in (RunStatus.LOADED, RunStatus.FAILED):
+    unsettled = (
+        status is RunStatus.LOADED
+        and reconciliation_state(evidence.manifest) in UNSETTLED_RECONCILIATION
+    )
+    if status in _SETTLED and not unsettled:
         raise ValueError(f"Run {run_id} is already {status}; a final run is never changed.")
-    stage = "validation" if status is RunStatus.STARTED else "load"
+    stage = (
+        "validation" if status is RunStatus.STARTED
+        else "reconciliation" if unsettled
+        else "load"
+    )
     evidence.formally_failed(stage, reason)
+
+
+def reconciliation_state(manifest: Mapping[str, Any]) -> ReconciliationState | None:
+    record = manifest.get("reconciliation")
+    if not isinstance(record, Mapping) or "state" not in record:
+        return None
+    return ReconciliationState(record["state"])
 
 
 def check_ready(run_id: str, *, evidence_root: Path | None = None) -> Readiness:
@@ -387,6 +432,19 @@ def check_ready(run_id: str, *, evidence_root: Path | None = None) -> Readiness:
         manifest = _read_json(directory / MANIFEST_NAME)
     except EvidenceUnreadableError as error:
         return Readiness(run_id, (str(error),))
+    problems = list(load_evidence_problems(run_id, directory, manifest))
+    if manifest.get("ready_for_reconciliation") is not True:
+        problems.append("The manifest does not mark the run ready for reconciliation.")
+    state = reconciliation_state(manifest)
+    if state is not None:
+        problems.append(f"A reconciliation attempt exists (state {state}).")
+    return Readiness(run_id, tuple(problems))
+
+
+def load_evidence_problems(
+    run_id: str, directory: Path, manifest: Mapping[str, Any]
+) -> tuple[str, ...]:
+    """Problems with the run's load evidence: status, transaction, source, report, database."""
     problems = []
     if manifest.get("status") != RunStatus.LOADED:
         problems.append(f"Status is {manifest.get('status')}, not LOADED.")
@@ -396,8 +454,6 @@ def check_ready(run_id: str, *, evidence_root: Path | None = None) -> Readiness:
         )
     if (manifest.get("evidence") or {}).get("state") != EvidenceState.COMPLETE:
         problems.append("Evidence is not complete.")
-    if manifest.get("ready_for_reconciliation") is not True:
-        problems.append("The manifest does not mark the run ready for reconciliation.")
     if (manifest.get("source") or {}).get("verified") is not True:
         problems.append("The archived source is not verified against the plan.")
 
@@ -417,7 +473,7 @@ def check_ready(run_id: str, *, evidence_root: Path | None = None) -> Readiness:
         problems.append("The conversion database is missing.")
     elif recorded_sha is None or _sha256(Path(database_path)) != recorded_sha:
         problems.append("The conversion database no longer matches its recorded checksum.")
-    return Readiness(run_id, tuple(problems))
+    return tuple(problems)
 
 
 # --- Load with evidence --------------------------------------------------------------------
@@ -931,6 +987,83 @@ class _Evidence:
             RunStatus.FAILED, failure, evidence=EvidenceState(evidence["state"]),
             evidence_error=evidence.get("error"),
         )
+
+    # Reconciliation.
+
+    def reconciliation_started(self, attempt: str) -> dict[str, Any]:
+        """Mark the attempt before any report exists. Returns the manifest as it was, for undo."""
+        before = copy.deepcopy(self.manifest)
+        self.manifest.update(
+            reconciliation={
+                "state": ReconciliationState.IN_PROGRESS,
+                "attempt": attempt,
+                "started_at": _utc_now(),
+            },
+            ready_for_reconciliation=False,
+        )
+        try:
+            self.save_manifest()
+        except BaseException:
+            self.manifest = before
+            raise
+        return before
+
+    def reconciliation_abandoned(self, before: dict[str, Any]) -> None:
+        """Undo :meth:`reconciliation_started` when no report was written. Best effort."""
+        try:
+            write_json_atomic(self.directory / MANIFEST_NAME, before)
+            self.manifest = before
+        except Exception:  # noqa: BLE001, S110
+            # The in-progress marker stays; a retry finds no report and reconciles afresh.
+            pass
+
+    def reconciled(
+        self, passed: bool, summary: dict[str, Any], failure: dict[str, Any] | None
+    ) -> None:
+        """Finalize a reconciliation. The load evidence and the database are untouched.
+
+        If the manifest cannot be written, records the attempt as ``unfinalized`` (best effort)
+        and re-raises; the run stays LOADED and not ready.
+        """
+        before = copy.deepcopy(self.manifest)
+        self.manifest["reconciliation"] = {**summary, "state": ReconciliationState.FINAL}
+        try:
+            self._final_manifest(RunStatus.RECONCILED if passed else RunStatus.FAILED, failure)
+        except BaseException as error:
+            self.manifest = before
+            self._record_unfinalized(summary, error)
+            raise
+
+    def _record_unfinalized(self, summary: dict[str, Any], error: BaseException) -> None:
+        try:
+            self.manifest["reconciliation"] = {
+                **self.manifest["reconciliation"],
+                "state": ReconciliationState.UNFINALIZED,
+                "report": summary["report"],
+                "report_sha256": summary["report_sha256"],
+                "result": summary["result"],
+                "error": f"{type(error).__name__}: {error}",
+            }
+            self.manifest["ready_for_reconciliation"] = False
+            self.save_manifest()
+        except Exception:  # noqa: BLE001, S110
+            # The manifest still says in_progress, which is not misleading either.
+            pass
+
+    def reconciliation_conflict(self, problems: list[str], report_sha256: str | None) -> None:
+        """Record contradictory reconciliation evidence. Best effort; the run stays LOADED."""
+        try:
+            self.manifest["reconciliation"] = {
+                **(self.manifest.get("reconciliation") or {}),
+                "state": ReconciliationState.CONFLICT,
+                "detected_at": _utc_now(),
+                "problems": problems,
+                "existing_report_sha256": report_sha256,
+            }
+            self.manifest["ready_for_reconciliation"] = False
+            self.save_manifest()
+        except Exception:  # noqa: BLE001, S110
+            pass
 
     def _settle_interrupted_load(self, reason: str) -> None:
         state, database, explanation = self.classify(TransactionState.IN_PROGRESS)

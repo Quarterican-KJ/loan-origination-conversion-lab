@@ -2,7 +2,9 @@
 
 Phase 1 reads, validates, and maps an extract into an immutable :class:`ConversionPlan`.
 Phase 2 loads that plan, unchanged, into a new isolated database (:func:`load_plan`).
-The contract is docs/conversion-specification.md. Reconciliation is not implemented yet.
+Phase 3 reconciles the loaded database independently against the archived source
+(:func:`reconcile_run`). The contract is docs/conversion-specification.md. Release approval is
+not implemented yet.
 """
 
 from loan_lab.conversion.legacy.contract import SOURCE_SYSTEM, Rule
@@ -29,6 +31,18 @@ from loan_lab.conversion.legacy.plan import (
     UnmappedField,
 )
 from loan_lab.conversion.legacy.planner import build_plan, plan_conversion
+from loan_lab.conversion.legacy.reconcile import (
+    Discrepancy,
+    ReconciliationCheck,
+    ReconciliationConflictError,
+    ReconciliationNotFinalizedError,
+    ReconciliationRefusedError,
+    ReconciliationResult,
+    ReconciliationRule,
+    RuleResult,
+    reconcile_run,
+    verify_reconciliation,
+)
 from loan_lab.conversion.legacy.run import (
     ArchivedSource,
     DatabaseState,
@@ -38,6 +52,7 @@ from loan_lab.conversion.legacy.run import (
     LoadRun,
     LoadRunFailedError,
     Readiness,
+    ReconciliationState,
     RecoveryResult,
     RunFailedError,
     RunStatus,
@@ -68,6 +83,7 @@ __all__ = [
     "ControlTotals",
     "ConversionPlan",
     "DatabaseState",
+    "Discrepancy",
     "Disposition",
     "EvidenceIncompleteError",
     "EvidenceState",
@@ -85,7 +101,15 @@ __all__ = [
     "RowResult",
     "Rule",
     "Readiness",
+    "ReconciliationCheck",
+    "ReconciliationConflictError",
+    "ReconciliationNotFinalizedError",
+    "ReconciliationRefusedError",
+    "ReconciliationResult",
+    "ReconciliationRule",
+    "ReconciliationState",
     "RecoveryResult",
+    "RuleResult",
     "RunFailedError",
     "RunIssue",
     "RunStatus",
@@ -104,7 +128,9 @@ __all__ = [
     "new_run_id",
     "plan_conversion",
     "read_extract",
+    "reconcile_run",
     "recover_run",
     "run_conversion",
     "run_load",
+    "verify_reconciliation",
 ]

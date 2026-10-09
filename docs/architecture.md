@@ -71,6 +71,8 @@ it, and produces an immutable `ConversionPlan`. It never opens a database.
 | `loader.py` | Phase 2: RUN-07, schema creation, and the single load transaction (below) |
 | `run.py` | Run lifecycle and evidence: reserves `output/conversion/<run_id>/`, archives the source, records validation failures, verifies the source (RUN-08), calls the loader, writes `manifest.json` and `reports/load_result.json`, and recovers, formally fails, or checks the readiness of a run |
 | `cli.py` | `python -m loan_lab.conversion.legacy`: reserve a run, validate and plan the extract, then load it with evidence |
+| `reconcile.py` | Phase 3: independent reconciliation (RC-01 to RC-10) of a `LOADED` run against its archived source, writing `reports/reconciliation.json` (below) |
+| `reconcile_cli.py` | `python -m loan_lab.conversion.legacy.reconcile_cli <run_id>`: reconcile one run |
 | `plan.py` | Frozen result types. Every source row gets one disposition, a dependent flag, rule codes, root causes, its raw line, and its mapped target values. Also holds conversion units, amount totals by disposition, and the unmapped-field inventory. |
 
 ```powershell
@@ -134,7 +136,7 @@ operate on the evidence only, never on the database:
 | --- | --- |
 | `recover_run(run_id)` | Settles a `STARTED`, `VALIDATED`, `LOADING`, or `UNKNOWN` run. Classifies the run's database read-only: exactly the planned counts and amount, with no `-journal`/`-wal` file, gives `LOADED` (report rewritten, marked recovered); no database or no business rows gives `FAILED` (unless the run was recorded as committed); anything else gives `UNKNOWN` with evidence `unverified`. A final run is returned unchanged. |
 | `fail_run(run_id, reason)` | Formally fails a non-final run (for example `UNKNOWN`) with step `formally_failed`. Refuses a run that is already `LOADED` or `FAILED`. |
-| `check_ready(run_id)` | Lists every reason a run is not ready for reconciliation: status, transaction, evidence state, ready flag, source verification, the load report, and the database checksum. |
+| `check_ready(run_id)` | Lists every reason a run is not ready for reconciliation: status, transaction, evidence state, ready flag, an existing reconciliation attempt, source verification, the load report, and the database checksum. |
 
 None of them reloads data, re-runs a run ID, or writes to a database. There is no command-line
 entry point for them yet.
@@ -198,15 +200,71 @@ print(check_ready("manual-check-1"))
 print(recover_run("manual-check-1"))
 '@ | python -
 #    Expect: problems=() for the loaded run, and "The run is already final." with changed=False.
+
+# 10. Reconcile the loaded run (Phase 3).
+python -m loan_lab.conversion.legacy.reconcile_cli manual-check-1; $LASTEXITCODE
+#    Expect: "Run manual-check-1 RECONCILED", PASS for RC-01 to RC-10, "Awaiting release
+#            approval", and exit code 0.
+Get-Content output\conversion\manual-check-1\reports\reconciliation.json
+#    Expect: "result": "PASS", rows 16/11/1/4, 13/6/2/5, 20/10/3/7; requested amounts
+#            source 5467000.00, loaded 2281000.00, excluded 291000.00, rejected 2895000.00,
+#            target 2281000.00; customers without applications 00010008, 00010009, 00010015;
+#            "discrepancies": []. In manifest.json: "status": "RECONCILED", "release": null.
+
+# 11. Reconciling again is refused (exit code 8) and nothing changes.
+python -m loan_lab.conversion.legacy.reconcile_cli manual-check-1; $LASTEXITCODE
 ```
 
 Exit codes: 0 loaded, 2 source validation failure (evidence only, no database), 3 RUN-07 refusal,
 4 load failure (rolled back, or unverified), 5 source changed since planning (RUN-08), 6 the load
-committed but its evidence is incomplete (recover the run). Remove `data\conversion\manual-check-1`
-and `output\conversion\manual-check-1` and `manual-check-2` by hand when they are no longer needed.
+committed but its evidence is incomplete (recover the run). The reconciliation command exits with
+0 reconciled, 7 discrepancies found (run `FAILED`), 8 refused (nothing written), 9 conflicting
+reconciliation evidence (preserved; run not reconciled), or 10 report written but not finalized
+(run not reconciled; run the command again to verify and finalize). Remove
+`data\conversion\manual-check-1` and `output\conversion\manual-check-1` and `manual-check-2` by
+hand when they are no longer needed.
 
-Reconciliation, the exception, exclusion, warning, and unmapped-field reports, `run.log`, and
-release approval are not implemented. The source files are only read, never moved or modified.
+The exception, exclusion, warning, and unmapped-field reports, `run.log`, and release approval are
+not implemented. The source files are only read, never moved or modified.
+
+**Phase 3 (implemented): independent reconciliation.** `reconcile_run(run_id)` proves that the
+run's database holds exactly what its archived source says it should (spec section 12):
+
+| Step | Behavior |
+| --- | --- |
+| Refuse | Nothing is written, and the status is unchanged, unless `check_ready` passes, every archived source file still has its recorded SHA-256, no `-journal`/`-wal` file exists, and the database SHA-256 equals the one recorded at load time (checked again after reading). |
+| Source | The archived files are re-read by the reconciler's own CSV reader, and the control totals are re-checked against them (RC-02). |
+| Expected values | Recomputed from raw source text with the reconciler's own code tables and section 7 transformations, in `Decimal`. The conversion plan's mapped values are never used, so a wrong code table or transformation in the converter is caught. |
+| Dispositions | Re-derived by re-validating the archived files with the Phase 1 rules, then cross-checked: excluded rows must meet an exclusion criterion judged from their raw text, loaded rows must not, rejected rows must not unless rejected before exclusions (SV-01, SV-09, SV-10), and loaded rows must pass independent validation. |
+| Target | A raw `sqlite3` connection with `mode=ro` and `PRAGMA query_only`. Amounts and rates are read as stored scaled integers and converted with `Decimal`; anything else is a discrepancy. |
+| Compare | RC-01 to RC-10, every loaded record and relationship, not a sample. Each discrepancy has a rule code, a stable `check` name, the source file, line, and key, the target table and ID, the field, expected and actual values, and an explanation. |
+| Record | Two-phase. The manifest first records the attempt (`reconciliation.state: in_progress`, not ready, still `LOADED`); then `reports/reconciliation.json` is written atomically with the same attempt ID; then the manifest is finalized with the report's SHA-256: `RECONCILED` if every rule passed (`release_review: awaiting_approval`), otherwise `FAILED` at stage `reconciliation` (`release_review: blocked`). The database and all earlier evidence stay unchanged. Nothing is released or declined. |
+
+Because the comparison is field by field and relationship by relationship, it catches errors that
+counts and totals hide: swapped amounts, a wrong rate, status, or name, a guarantor on the wrong
+application, a co-borrower recorded with the wrong role, a missing primary borrower, and a
+standalone customer given a relationship.
+
+**Evidence recovery (spec section 12.2).** A report on disk is never enough to treat a run as
+reconciled; only a finalized manifest is. When something goes wrong:
+
+| Situation | What the operator sees | What to do |
+| --- | --- | --- |
+| Report write failed | The error; manifest restored, run `LOADED` and ready, no report | Reconcile again |
+| Manifest could not be finalized | Exit 10 / `ReconciliationNotFinalizedError`; `reconciliation.state` `unfinalized` (or `in_progress`), run `LOADED`, not ready; provisional report kept | Reconcile again. The retry re-checks the load evidence, source, and database hashes, re-runs the comparison, and finalizes only if the existing report is byte-identical to its recorded hash and matches the fresh result. The report is not rewritten. |
+| Process interrupted mid-attempt | `state: in_progress`, with or without a report | Reconcile again, as above |
+| Database or source changed since the attempt | Retry refused (exit 8); nothing written | Investigate; `fail_run` the run, then convert again |
+| Report without an attempt, from another attempt, tampered, unreadable, missing, or contradicted by a fresh comparison | Exit 9 / `ReconciliationConflictError`; `state: conflict` with the problems; report preserved; run `LOADED`, not ready. Retrying gives the same conflict. | Investigate the evidence, then `fail_run(run_id, reason)`: `FAILED` at stage `reconciliation`, evidence kept. Convert again in a new run. |
+| A `RECONCILED` run must be re-checked later | `verify_reconciliation(run_id)` lists problems: report hash, attempt, result, database or source hash drift, any release recorded | Investigate any problem. Passing verification is not release approval. |
+
+**Independence limits.** Reconciliation takes each row's disposition from re-running the Phase 1
+rules, so a planner defect that wrongly rejects a valid row reconciles cleanly (the row is neither
+expected nor present), and wrong rule codes or root causes on rejected rows are not compared.
+`tests/test_conversion_spec_acceptance.py` guards the sample extract instead. It holds
+hand-transcribed spec section 15 constants for all 13 applications: dispositions, rule codes,
+root-cause classes and originating lines, unit membership, amounts, and loaded relationships. It
+checks the planner and the loaded target against them, and shows that injected planner defects
+fail it. For other extracts, these remain reviewer responsibilities (spec section 12.1).
 
 ### Validation (`loan_lab.validation`)
 
@@ -214,11 +272,12 @@ Rules applied between transform and load, for example: required fields present, 
 
 ### Reconciliation (`loan_lab.reconciliation`)
 
-Proves the conversion was complete and accurate by comparing source and target:
+A generic placeholder for reconciling other conversions. The legacy conversion's reconciliation is
+implemented in `loan_lab.conversion.legacy.reconcile` (Phase 3 above), which compares:
 
-- **Record counts** — records read = records loaded + records rejected.
-- **Control totals** — e.g., sum of principal balances in source vs. target.
-- **Field-level spot checks** — sampled records compared value by value.
+- **Record counts** — records read = loaded + excluded + rejected, per file.
+- **Control totals** — the source and target amount totals, exactly in `Decimal`.
+- **Field-level comparison** — every loaded record, value by value, not a sample.
 
 ## LOS data model
 
@@ -627,8 +686,8 @@ Server-rendered pages over the development database (`data/loan_lab_dev.db`):
 Implemented: the application skeleton, `GET /health`, and the LOS data model (`Borrower`,
 `LoanApplication`, `ApplicationParty`, `Collateral`, `CollateralPledge`, `Lien`) with exact decimal
 storage, the deterministic synthetic data generator (`loan_lab.synthetic`), and a read-only
-web interface (`loan_lab.web`), and phases 1 and 2 of the legacy conversion
-(`loan_lab.conversion.legacy`): validation and mapping into a conversion plan, then transactional
-loading into an isolated per-run database. Not yet implemented: authentication, editing,
-database migrations, workflow validation and status transitions, collateral policy and LTV,
-conversion reconciliation, run reports, and release approval.
+web interface (`loan_lab.web`), and phases 1 to 3 of the legacy conversion
+(`loan_lab.conversion.legacy`): validation and mapping into a conversion plan, transactional
+loading into an isolated per-run database, and independent reconciliation. Not yet implemented:
+authentication, editing, database migrations, workflow validation and status transitions,
+collateral policy and LTV, the exception and exclusion reports, and release approval.

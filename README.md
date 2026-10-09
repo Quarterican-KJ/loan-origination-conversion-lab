@@ -34,7 +34,7 @@ A Python learning lab that simulates two things found in banking technology:
 │       ├── paths.py         # Project-root and default database path resolution
 │       ├── models/          # SQLAlchemy models: borrowers, applications, collateral, liens
 │       ├── synthetic/       # Deterministic synthetic data generator + seeding CLI
-│       ├── conversion/      # Legacy CSV conversion: validate, map, and load (no reconciliation yet)
+│       ├── conversion/      # Legacy CSV conversion: validate, map, load, and reconcile
 │       ├── validation/      # Data validation rules (future)
 │       ├── reconciliation/  # Source-to-target reconciliation (future)
 │       └── web/             # Read-only LOS interface: routes, queries, templates, static CSS/JS
@@ -167,9 +167,10 @@ Each run keeps its evidence in `output\conversion\<run_id>\` (git-ignored):
 
 | Path | Contents |
 | --- | --- |
-| `manifest.json` | Run ID, UTC timestamps, status (`STARTED`, `VALIDATED`, `LOADING`, `LOADED`, `FAILED`, or `UNKNOWN`), the database transaction state and evidence state (recorded separately), whether the run is ready for reconciliation, source checksums, validation counts or run-level errors, expected target counts and amount, database checksum, and the failure stage, step, and reason |
+| `manifest.json` | Run ID, UTC timestamps, status (`STARTED`, `VALIDATED`, `LOADING`, `LOADED`, `RECONCILED`, `FAILED`, or `UNKNOWN`), the database transaction state and evidence state (recorded separately), whether the run is ready for reconciliation, source checksums, validation counts or run-level errors, expected target counts and amount, database checksum, and the failure stage, step, and reason |
 | `source\` | Exact copies of the source files that could be read, checked against the checksums taken at planning |
 | `reports\load_result.json` | Written once a load was attempted: counts and requested amount read back from the database (amounts as decimal strings), transaction states, and failure details |
+| `reports\reconciliation.json` | Written by reconciliation: the result of each rule RC-01 to RC-10, totals, distributions, relationships, customers without converted applications, every discrepancy with its source line, target ID, and expected and actual values, and the attempt ID the manifest must match |
 
 The run folder is reserved before the source is validated, so an invalid extract still leaves a
 `FAILED` manifest and its archived files, but no database. Run IDs are never reused, even after a
@@ -180,9 +181,30 @@ If the load commits but its evidence cannot be completed, the run stays `LOADING
 reconciliation, and the command exits with code 6. `recover_run` then inspects the database
 read-only and marks the run `LOADED`, `FAILED`, or `UNKNOWN` (when the outcome cannot be verified);
 `fail_run` formally fails an `UNKNOWN` run, and `check_ready` reports whether a run may proceed.
-None of them reloads data or modifies a database. Reconciliation and release approval are not
-implemented yet. See the manual verification procedure in
-[docs/architecture.md](docs/architecture.md).
+None of them reloads data or modifies a database.
+
+Then reconcile the loaded run against its archived source:
+
+```powershell
+python -m loan_lab.conversion.legacy.reconcile_cli manual-check-1
+```
+
+Reconciliation re-reads the archived files, recomputes every expected value independently (never
+reusing the converter's mapped values), and compares every loaded record and relationship with the
+database, which it opens read-only. If every rule passes, the run becomes `RECONCILED` and awaits a
+release decision; otherwise it becomes `FAILED` and cannot be released. It refuses a run that is
+not ready, or whose archived files or database no longer match their recorded checksums. It never
+modifies the database, reloads, or releases a run; release approval is not implemented yet. See
+the manual verification procedure in [docs/architecture.md](docs/architecture.md).
+
+The manifest records each reconciliation attempt before the report is written, and the run counts
+as reconciled only once the manifest is finalized with the report's checksum. If finalization
+fails (exit code 10), the run stays `LOADED` and not ready, with the report kept. Running the
+command again re-checks the source and database checksums and the report, then finalizes it.
+Contradictory reconciliation evidence (exit code 9) is preserved, never overwritten; investigate,
+then close the run with `fail_run`. `verify_reconciliation` re-checks a `RECONCILED` run's
+evidence later. The recovery procedure and the remaining independence limits are in spec
+section 12 and [docs/architecture.md](docs/architecture.md).
 
 ## Run the tests
 
@@ -194,7 +216,7 @@ python -m pytest
 
 Implemented: the `GET /health` endpoint, the LOS data model (borrowers, applications, parties,
 collateral, pledges, liens), the synthetic data generator, a read-only LOS web interface, and
-legacy conversion validation, mapping, and transactional loading with per-run evidence.
-Not yet implemented: authentication, editing, database migrations, workflow validation,
-conversion reconciliation, and release approval. See
+legacy conversion validation, mapping, transactional loading with per-run evidence, and
+independent reconciliation. Not yet implemented: authentication, editing, database migrations,
+workflow validation, and release approval. See
 [docs/architecture.md](docs/architecture.md) for the design and its current limitations.

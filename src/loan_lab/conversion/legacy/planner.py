@@ -489,6 +489,8 @@ def _resolve_units(
 
     units = []
     for key, app_drafts in applications.items():
+        for app in app_drafts:
+            app.unit_key = key
         unit_parties = by_unit.get(key, [])
         if len(app_drafts) == 1 and app_drafts[0].open:
             _check_unit(app_drafts[0], unit_parties)
