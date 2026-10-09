@@ -99,6 +99,7 @@ def build_plan(extract: SourceExtract) -> ConversionPlan:
     return ConversionPlan(
         control=extract.control,
         checksums=extract.checksums,
+        control_sha256=extract.control_sha256,
         borrowers=tuple(frozen[id(d)] for d in borrowers),
         applications=tuple(frozen[id(d)] for d in applications),
         parties=tuple(frozen[id(d)] for d in parties),

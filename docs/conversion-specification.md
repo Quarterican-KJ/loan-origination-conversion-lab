@@ -9,8 +9,13 @@ each other, and how the result is reconciled.
 > `sample_data/legacy/` are invented for this lab. They do not describe any real vendor product,
 > core-banking system, institution, or person.
 
-**Status:** specification only. The conversion engine is not implemented yet. Nothing in this
-document changes the existing SQLAlchemy models or the seeded development database.
+**Status:** stages 1–3 are implemented in `loan_lab.conversion.legacy`: source validation and
+mapping into a conversion plan (Phase 1), and target loading with its run evidence (Phase 2:
+`manifest.json`, the verified source archive, and `reports/load_result.json`), including evidence
+for source-validation failures and read-only recovery of runs whose evidence is incomplete
+(sections 2.2 and 13). Reconciliation, the exception and exclusion reports, and release approval
+are not implemented yet. Nothing in this document changes the
+existing SQLAlchemy models or the seeded development database.
 
 ## Contents
 
@@ -94,10 +99,10 @@ happens to the run.
 
 | Outcome | Scope | Triggered by | Effect on data | Effect on run | Evidence |
 | --- | --- | --- | --- | --- | --- |
-| **Source-file validation failure** | Whole extract | A run-level check (RUN-01 to RUN-06) | Nothing is loaded. Rows receive no disposition. | `FAILED` at stage `validation` | Run report naming the file and rule |
+| **Source-file validation failure** | Whole extract | A run-level check (RUN-01 to RUN-06) | Nothing is loaded and no target database is created. Rows receive no disposition. | `FAILED` at stage `validation` | `manifest.json` listing every run-level issue with its file and rule, and the archived `source/` files with their checksums |
 | **Record rejection** | One source row, or one conversion unit (section 8.2) | A record rule (SV, MP, or RF) | That row, or that unit, is not loaded. Other records continue. | None by itself. The run can still pass. | `exceptions.csv` |
 | **Intentional exclusion** | One source row | An exclusion rule (EX) | The row is not loaded. This is not an error. | None | `exclusions.csv` |
-| **Load failure** | Whole load | A database error during insert or commit | The transaction rolls back, so no converted rows are committed. | `FAILED` at stage `load` | Run report with the database error and the load-plan summary |
+| **Load failure** | Whole load | The RUN-07 or RUN-08 precondition (section 9.1), or a database or converter error during schema creation, insert, or commit | RUN-07 and RUN-08: nothing is written to any existing file or database. Otherwise the transaction rolls back, so no converted rows are committed. | `FAILED` at stage `load`, or `UNKNOWN` if the database does not confirm the rollback | `manifest.json` and `reports/load_result.json` with the failing step, the error, the planned counts and amount, transaction states, and the rows found in the database afterwards |
 | **Reconciliation failure** | Whole run | Any reconciliation rule (RC-01 to RC-10) does not match | Committed rows are **kept unchanged** for troubleshooting but cannot be released. | `FAILED` at stage `reconciliation` | `reconciliation.md` with expected and actual values |
 | **Release approval** | Whole run | A named reviewer's sign-off after reconciliation passes | The conversion database is accepted as the run's output. | `RELEASED` | Approval record in the run manifest |
 
@@ -115,8 +120,14 @@ stateDiagram-v2
     [*] --> STARTED
     STARTED --> VALIDATED: run-level checks pass
     STARTED --> FAILED: source-file validation failure
-    VALIDATED --> LOADED: load commits
-    VALIDATED --> FAILED: load failure
+    VALIDATED --> LOADING: recorded before the load starts
+    VALIDATED --> FAILED: RUN-08 refusal
+    LOADING --> LOADED: load commits and evidence is complete
+    LOADING --> FAILED: load failure (rolled back) or RUN-07 refusal
+    LOADING --> UNKNOWN: outcome cannot be verified
+    LOADING --> LOADED: recovery verifies the commit
+    UNKNOWN --> LOADED: recovery verifies the commit
+    UNKNOWN --> FAILED: formally failed
     LOADED --> RECONCILED: all reconciliation rules pass
     LOADED --> FAILED: reconciliation failure
     RECONCILED --> RELEASED: reviewer approves
@@ -127,6 +138,47 @@ stateDiagram-v2
 patched. After the cause is fixed, a **new run** starts with a new run ID and a new, empty
 conversion database. `FAILED` always records the failing stage: `validation`, `load`, or
 `reconciliation`.
+
+**Run status, database transaction, and evidence are recorded separately.** The manifest keeps
+three independent facts, so a reporting failure can never make a committed load look as if it
+never happened:
+
+| Manifest field | Values | Meaning |
+| --- | --- | --- |
+| `status` | `STARTED`, `VALIDATED`, `LOADING`, `LOADED`, `FAILED`, `UNKNOWN` | Where the run is in its lifecycle |
+| `database_transaction` | `not_started`, `in_progress`, `committed`, `rolled_back`, `not_committed`, `unknown` | Whether business rows were committed. `not_committed` and `unknown` are established by read-only inspection. |
+| `evidence.state` | `in_progress`, `complete`, `incomplete`, `unverified` | Whether the manifest and report fully describe the database |
+| `ready_for_reconciliation` | `true` or `false` | `true` only for `LOADED` with `committed` and `complete` evidence |
+
+- `LOADING` is written **before** the load starts. If the run stops at any point after that, the
+  manifest says `LOADING`, never `VALIDATED`, so a load that may have happened is never hidden.
+- If the load commits but writing the final report or manifest fails, the run stays `LOADING`
+  with `database_transaction: committed` (when that can still be recorded),
+  `evidence.state: incomplete`, and `ready_for_reconciliation: false`. It is **not ready** for
+  reconciliation or release until its evidence is repaired by recovery or the run is formally
+  failed.
+- **Recovery** (`recover_run`) settles a run left in `STARTED`, `VALIDATED`, `LOADING`, or `UNKNOWN`. It
+  inspects the run's own database **read-only** (a `mode=ro` connection with `query_only`) and
+  rewrites only the run's manifest and load report. It never reloads data, creates or modifies a
+  database, or touches another run:
+
+  | Found | Result |
+  | --- | --- |
+  | Status `UNKNOWN` | Classified again as below, so a commit can be verified later |
+  | `STARTED` (validation was interrupted) | `FAILED` at stage `validation`; no database exists |
+  | `VALIDATED` (interrupted before the load started) | `FAILED` at stage `load`, `not_started` |
+  | Database holds exactly the planned rows and requested amount, with no leftover transaction files | `LOADED`, `committed`, evidence `complete` and marked recovered |
+  | No database, or no business rows, and the load was never recorded as committed | `FAILED` at stage `load`, `not_committed` |
+  | A `-journal` or `-wal` file is present, the database cannot be read, the counts or amount differ from the plan, or a load recorded as committed has no database or no rows | `UNKNOWN`, `unknown`, evidence `unverified` |
+
+- `UNKNOWN` means the outcome could not be verified; it is reported rather than guessed. An
+  `UNKNOWN` run is never ready for reconciliation. It is closed by **formally failing** it
+  (`fail_run`), which records `FAILED` with step `formally_failed` and leaves the database and
+  `database_transaction` untouched. A final run (`LOADED` or `FAILED`) is never changed by recovery
+  or by `fail_run`.
+- `check_ready` confirms a run may proceed to reconciliation: status `LOADED`, transaction
+  `committed`, evidence `complete`, the ready flag set, the source archive verified, a successful
+  load report for the run, and a database whose SHA-256 still equals the recorded one.
 
 ### 2.3 Release approval
 
@@ -502,11 +554,32 @@ RUN-06 covers every way `extract_control.csv` can be invalid:
 RUN-04 and RUN-05 compare the data files against the control file, so they are evaluated only
 once the control file passes RUN-06.
 
-**RUN-07 is a future loader precondition, not a Phase 1 check.** Before the loader writes
-anything, it must confirm the run's conversion database is new and contains no LOS rows (v1 is a
-full load into an isolated database; section 11). Phase 1 never opens a database, so RUN-07 is
-not evaluated until the loader exists. A RUN-07 failure will be a load-stage precondition failure
-with nothing written, reported like the run-level checks above.
+**RUN-07 is a loader precondition, not a source check.** Before the loader writes anything, it
+confirms the run's conversion database is new and contains no LOS rows (v1 is a full load into an
+isolated database; section 11). Planning (Phase 1) never opens a database; the loader (Phase 2)
+evaluates RUN-07 for the database after the source checks pass. The run's evidence directory is
+reserved first, before source validation, so even a run with an invalid extract spends its run
+ID. RUN-07 fails, with nothing written to any existing file, when:
+
+| Condition | Why |
+| --- | --- |
+| The evidence directory `output/conversion/<run_id>/` already exists, even if empty | A run ID is never reused, including after a failed validation or load. Nothing at all is written. |
+| The run directory `data/conversion/<run_id>/` already exists, even if empty | A run ID is never reused. The run's new evidence directory records the refusal. |
+| `loan_lab_conversion.db` already exists when the loader creates it (exclusive create) | An existing database is never overwritten, even one created concurrently |
+| The newly created database already holds any schema object | It cannot then be proven free of LOS rows |
+
+**RUN-08 is a second loader precondition: the source has not changed since planning.** The plan
+records the SHA-256 of all four source files as read for planning. Before any database is
+created, the loader archives each file into the run's `source/` directory, hashing the bytes as
+they are read and hashing the archived copy again. Every file must give the planned checksum at
+both points. A file that changed, was deleted, or cannot be read fails RUN-08: the run becomes
+`FAILED` at stage `load`, no database is created, and the archive keeps the bytes that were
+actually found. The loader never re-plans or reloads; after the source is corrected, a new run
+plans it again under a new run ID.
+
+A run ID that is not a single safe path segment (1–64 letters, digits, `-` or `_`, starting with
+a letter or digit) is refused before anything is created, so a run can never write outside its
+own directory.
 
 ### 9.2 Stage 1: source validation (record is rejected)
 
@@ -620,20 +693,38 @@ conflict, not an exclusion, and is rejected (RF-04).
   models, at `data/conversion/<run_id>/loan_lab_conversion.db`. A run never writes to the seeded
   development database `data/loan_lab_dev.db`, or to another run's database. Only valid records
   in the load plan are written; rejected and excluded rows exist only in the reports.
-- **One transaction:** the whole load plan is inserted in a single transaction. If any insert or the
-  commit fails, everything rolls back. The run becomes `FAILED` at stage `load`, the database is
-  left with its empty schema, and the database error and load-plan summary are written to the run
-  report. Validation should make such failures impossible, so one indicates a converter defect.
+- **Schema first, then one load transaction:** the empty schema is created from the current models
+  in its own transaction, and then the whole load plan is inserted in a single transaction. If any
+  insert or the commit fails, everything rolls back. The run becomes `FAILED` at stage `load`, the
+  database is left with its empty schema (or with no tables, if creating the schema itself failed),
+  and the failing step, the database error, and the load-plan summary are written to
+  `manifest.json` and `reports/load_result.json` (section 13). No converted row is ever committed
+  by a failed load. Validation should make such failures impossible, so one
+  indicates a converter defect.
+- **No data decisions:** the loader inserts exactly the plan's load-eligible rows. It never
+  re-evaluates a mapping, exclusion, or rejection. If the plan is inconsistent (for example, an
+  eligible party whose application or borrower is not being loaded, or a source key that appears
+  twice), the load fails and rolls back; nothing is skipped or repaired.
 - **Order:** borrowers, then applications, then parties. Database-generated IDs are kept in an
   in-memory crosswalk (`CUST_NO` → `Borrower.id`, `APPL_NO` → `LoanApplication.id`) that is used to
-  resolve party foreign keys.
+  resolve party foreign keys. The committed load returns these crosswalks, plus
+  (`APPL_NO`, `CUST_NO`) → `ApplicationParty.id`, with the loaded counts and requested amount.
+  Reconciliation may compare them with the target, but still queries the target independently
+  (section 12).
 - **Inserts only:** the load never updates or deletes rows. A run refuses to load into a database
-  that is not new and empty. That is the RUN-07 loader precondition (section 9.1), which is not
-  implemented in Phase 1. A rerun always starts fresh under a new run ID.
+  that is not new and empty (RUN-07, section 9.1). A failed run's directory is kept as evidence, so
+  its run ID is spent. A rerun always starts fresh under a new run ID. There is no reset or
+  overwrite option.
 - **Exact values:** amounts and rates are passed as `Decimal` and stored by `ExactDecimal`. The
   loader never touches a float.
 - **Bounded batches:** inserts are issued in batches of a configurable size inside the single
   transaction, so memory stays flat for larger extracts.
+- **Evidence after commit:** once the load transaction commits, the database is read back
+  (read-only) and the evidence is completed. If that fails, the committed rows are left exactly
+  as they are; the run stays `LOADING`, is recorded as committed with incomplete evidence where
+  possible, and is not ready for reconciliation until `recover_run` verifies it or `fail_run`
+  closes it (section 2.2). Evidence is never repaired by reloading, re-running under the same ID,
+  or writing to the database.
 
 ## 12. Reconciliation rules
 
@@ -692,8 +783,9 @@ directory is overwritten by a later run.
 
 | File | Contents |
 | --- | --- |
-| `manifest.json` | Run ID; start and end times; status (section 2.2) and failing stage, if any; specification version; source directory; SHA-256 of each archived source file and of the conversion database; row counts by disposition; release approval record, if any |
-| `source/` | Byte-for-byte copies of the four source files |
+| `manifest.json` | Run ID; start, last-update, and end times (UTC); status, database transaction state, evidence state, and readiness for reconciliation (section 2.2); failure (stage, step, rule, reason), if any; specification version; source directory; for each source file the planned, read, and archived SHA-256, its size, and whether they agree; validation summary (control totals, row counts by disposition, requested amounts by disposition), or the run-level issues if validation failed; expected target counts and amount; the conversion database's path, tables, and SHA-256; load outcome; reconciliation and release approval records (empty until implemented) |
+| `source/` | Byte-for-byte copies of the source files that could be read, verified against the plan (RUN-08) when one exists |
+| `reports/load_result.json` | Written once a load was attempted. The load outcome: success, failure, or unverified; expected counts and amount, the counts and requested amount **read back from the database** afterwards (amounts as decimal strings), rows inserted, the state of the schema and load transactions, whether any business rows were committed, the database checksum, and the failing step and error |
 | `exceptions.csv` | Record rejections |
 | `exclusions.csv` | Intentional exclusions |
 | `warnings.csv` | Warnings (WN-01) |
@@ -701,8 +793,44 @@ directory is overwritten by a later run.
 | `reconciliation.md` | Results for RC-01 to RC-10, with expected and actual values, the customers without converted applications, and a final PASS or FAIL |
 | `run.log` | Stage-by-stage log, including the database error for a load failure |
 
-A source-file validation failure produces `manifest.json`, `source/`, and `run.log` only. Nothing
-is dispositioned or loaded.
+A source-file validation failure produces `manifest.json` and `source/` only (plus `run.log` once
+implemented). The manifest records status `FAILED` at stage `validation`, every run-level issue
+(rule, file, line, message) under `validation.issues`, and `database_transaction: not_started`.
+Each source file that exists and is readable is archived with its raw bytes, SHA-256, and size;
+a missing, non-regular, or unreadable file is recorded with an `error` instead. Its
+`planned_sha256` is empty and `source.verified` is `null`, because no plan exists. Nothing is
+dispositioned or loaded, and **no target database or `data/conversion/<run_id>/` directory is
+created**.
+
+**How evidence is written:**
+
+- The evidence directory is **reserved** with an exclusive create before anything else is written,
+  including before source validation. If it already exists, the run is refused (RUN-07) and
+  nothing is written anywhere. Every run ID, including a failed one, is spent.
+- `manifest.json` is first written with status `STARTED` (or `VALIDATED`, when a pre-built plan
+  is loaded), updated after the source archive and validation, set to `LOADING` before the load
+  starts, and finally set to `LOADED` (only after the load commits and the report is written),
+  `FAILED`, or `UNKNOWN` (section 2.2).
+  Reports and the manifest are written to a temporary file in the same directory, flushed to disk,
+  and then atomically renamed over the previous version, so a reader never sees a partial file and
+  an interrupted write leaves the previous version intact. They are only ever replaced inside the
+  run's own directory.
+- Source files are only read, never moved or modified. The source archive and the target
+  database live in separate roots (`output/` and `data/`), both ignored by Git.
+- On a load failure the database is inspected read-only afterwards, so the report states what it
+  actually contains, not what the loader assumed. If the inspection does not confirm the rollback,
+  the run is `UNKNOWN`, not `FAILED`. An unexpected interruption is settled the same way: `FAILED`
+  with outcome `interrupted` if no business rows exist, `LOADING` with incomplete evidence if the
+  load verifiably committed, and `UNKNOWN` otherwise.
+- If the process dies before any of this can be recorded, the manifest is left as `STARTED`,
+  `VALIDATED`, or `LOADING`, and `recover_run` settles it (section 2.2).
+- In `reports/load_result.json`, `success` is `true`, `false`, or `null` (unverified), and
+  `business_rows_committed` is `true`, `false`, or `null` (unknown). A recovered report records
+  what recovery found under `recovered`.
+
+Not yet implemented: `exceptions.csv`, `exclusions.csv`, `warnings.csv`, `unmapped_fields.csv`,
+`reconciliation.md`, and `run.log`. Recovery and formal failure are library functions only; there
+is no command-line entry point for them yet.
 
 **`exceptions.csv`** has one row per failure. A record with several failures has several rows.
 

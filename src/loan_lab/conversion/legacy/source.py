@@ -73,6 +73,7 @@ class SourceExtract:
     directory: Path
     files: Mapping[str, SourceFile]
     control: ControlTotals
+    control_sha256: str
 
     @property
     def borrowers(self) -> SourceFile:
@@ -130,6 +131,7 @@ def read_extract(directory: Path) -> SourceExtract:
         directory=directory,
         files=MappingProxyType({name: files[name] for name in contract.DATA_FILES}),
         control=control,
+        control_sha256=files[contract.CONTROL_FILE].sha256,
     )
 
 

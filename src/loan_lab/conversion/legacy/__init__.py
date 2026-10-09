@@ -1,10 +1,19 @@
-"""Legacy LOS CSV conversion, phase 1: read, validate, and map into an immutable plan.
+"""Legacy LOS CSV conversion.
 
-The contract is docs/conversion-specification.md. Loading and reconciliation are not implemented;
-they will consume :class:`ConversionPlan` without changing it.
+Phase 1 reads, validates, and maps an extract into an immutable :class:`ConversionPlan`.
+Phase 2 loads that plan, unchanged, into a new isolated database (:func:`load_plan`).
+The contract is docs/conversion-specification.md. Reconciliation is not implemented yet.
 """
 
 from loan_lab.conversion.legacy.contract import SOURCE_SYSTEM, Rule
+from loan_lab.conversion.legacy.loader import (
+    LoadCounts,
+    LoadFailedError,
+    LoadResult,
+    TargetPreconditionError,
+    load_plan,
+    new_run_id,
+)
 from loan_lab.conversion.legacy.plan import (
     AmountTotals,
     ApplicationUnit,
@@ -20,6 +29,27 @@ from loan_lab.conversion.legacy.plan import (
     UnmappedField,
 )
 from loan_lab.conversion.legacy.planner import build_plan, plan_conversion
+from loan_lab.conversion.legacy.run import (
+    ArchivedSource,
+    DatabaseState,
+    EvidenceIncompleteError,
+    EvidenceState,
+    EvidenceUnreadableError,
+    LoadRun,
+    LoadRunFailedError,
+    Readiness,
+    RecoveryResult,
+    RunFailedError,
+    RunStatus,
+    SourceChangedError,
+    SourceRunFailedError,
+    TransactionState,
+    check_ready,
+    fail_run,
+    recover_run,
+    run_conversion,
+    run_load,
+)
 from loan_lab.conversion.legacy.source import (
     ControlTotals,
     RunIssue,
@@ -33,23 +63,48 @@ __all__ = [
     "SOURCE_SYSTEM",
     "AmountTotals",
     "ApplicationUnit",
+    "ArchivedSource",
     "Cause",
     "ControlTotals",
     "ConversionPlan",
+    "DatabaseState",
     "Disposition",
+    "EvidenceIncompleteError",
+    "EvidenceState",
+    "EvidenceUnreadableError",
     "Issue",
+    "LoadCounts",
+    "LoadFailedError",
+    "LoadResult",
+    "LoadRun",
+    "LoadRunFailedError",
     "MappedApplication",
     "MappedBorrower",
     "MappedParty",
     "Outcome",
     "RowResult",
     "Rule",
+    "Readiness",
+    "RecoveryResult",
+    "RunFailedError",
     "RunIssue",
+    "RunStatus",
+    "SourceChangedError",
+    "SourceRunFailedError",
     "SourceExtract",
     "SourceRef",
     "SourceValidationError",
+    "TargetPreconditionError",
+    "TransactionState",
     "UnmappedField",
     "build_plan",
+    "check_ready",
+    "fail_run",
+    "load_plan",
+    "new_run_id",
     "plan_conversion",
     "read_extract",
+    "recover_run",
+    "run_conversion",
+    "run_load",
 ]

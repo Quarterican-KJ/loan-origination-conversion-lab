@@ -109,6 +109,10 @@ class Rule(StrEnum):
     RUN_04 = "RUN-04"
     RUN_05 = "RUN-05"
     RUN_06 = "RUN-06"
+    # Loader precondition: the run's conversion database is new and empty.
+    RUN_07 = "RUN-07"
+    # Loader precondition: the source files are byte-identical to those the plan was built from.
+    RUN_08 = "RUN-08"
 
     SV_01 = "SV-01"
     SV_02 = "SV-02"

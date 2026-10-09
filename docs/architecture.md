@@ -68,14 +68,145 @@ it, and produces an immutable `ConversionPlan`. It never opens a database.
 | `source.py` | Reads the files and applies the run-level checks (RUN-01 to RUN-06). Raises `SourceValidationError` so nothing is planned from a bad extract. |
 | `transforms.py` | Pure, exact conversions: names, amounts, rates, terms |
 | `planner.py` | Record-level stages in spec order: structure, duplicates, exclusions, source checks, mapping, references, conversion units, warnings |
+| `loader.py` | Phase 2: RUN-07, schema creation, and the single load transaction (below) |
+| `run.py` | Run lifecycle and evidence: reserves `output/conversion/<run_id>/`, archives the source, records validation failures, verifies the source (RUN-08), calls the loader, writes `manifest.json` and `reports/load_result.json`, and recovers, formally fails, or checks the readiness of a run |
+| `cli.py` | `python -m loan_lab.conversion.legacy`: reserve a run, validate and plan the extract, then load it with evidence |
 | `plan.py` | Frozen result types. Every source row gets one disposition, a dependent flag, rule codes, root causes, its raw line, and its mapped target values. Also holds conversion units, amount totals by disposition, and the unmapped-field inventory. |
 
 ```powershell
 python -c "from pathlib import Path; from loan_lab.conversion.legacy import plan_conversion; p = plan_conversion(Path('sample_data/legacy')); print(p.amounts)"
 ```
 
-Loading, reconciliation, run reports, and release approval are not implemented. RUN-07 (empty
-target database) is a future loader precondition and is not evaluated in Phase 1.
+**Phase 2 (implemented): transactional target loading.** `loader.py` consumes a `ConversionPlan`
+unchanged and writes it to a new, isolated SQLite database (spec section 11):
+
+| Step | Behavior |
+| --- | --- |
+| Run ID | Must be one safe path segment (`[A-Za-z0-9][A-Za-z0-9_-]{0,63}`); `new_run_id()` gives a UTC timestamp plus a random suffix. |
+| RUN-07 | `data/conversion/<run_id>/` (and, through `run_load`, `output/conversion/<run_id>/`) must not exist; `loan_lab_conversion.db` is created exclusively and must contain no schema objects. Otherwise `TargetPreconditionError` is raised and no existing file is touched. |
+| Schema | Created from the current models (`Base.metadata`) in its own transaction. |
+| Load | One `BEGIN IMMEDIATE` transaction: borrowers, then applications, then parties, in batches (`batch_size`, default 1,000) with `INSERT ... RETURNING id`. Party foreign keys come from the in-memory crosswalks. |
+| Failure | Any error after the database file is created (database constraint, inexact decimal, inconsistent plan, commit failure) rolls back and raises `LoadFailedError` with the run ID, database path, planned counts and amount, and the cause. The database keeps only its empty schema as evidence and the run ID is spent. |
+| Result | `LoadResult`: counts, requested amount (exact `Decimal`), and read-only crosswalks `CUST_NO → Borrower.id`, `APPL_NO → LoanApplication.id`, and `(APPL_NO, CUST_NO) → ApplicationParty.id`. |
+
+The loader makes no data decisions: it inserts exactly `plan.borrowers_to_load`,
+`applications_to_load`, and `parties_to_load`. Valid customers with no converted application
+(WN-01) load like any other customer. A party whose application or borrower is not in the plan
+fails the load instead of being skipped. pysqlite normally runs DDL outside transactions and
+begins them lazily, so the loader disables driver transaction handling and issues `BEGIN IMMEDIATE`
+itself. That makes both the schema step and the load step atomic. There is no reset, overwrite,
+or delete option; failed and successful run directories stay until someone deliberately removes
+them.
+
+**Run evidence.** `run_conversion(source_directory, run_id)` (used by the CLI) reserves the run,
+archives and validates the source, plans it, and loads it. `run_load(plan, source_directory,
+run_id)` does the same for a plan built beforehand. Both record every outcome under
+`output/conversion/<run_id>/` (spec sections 2.2 and 13):
+
+| Step | Behavior |
+| --- | --- |
+| Reserve | `output/conversion/<run_id>/` is created with `exist_ok=False` **before source validation**. If it exists, `TargetPreconditionError` (RUN-07) is raised and nothing is written anywhere. Every run ID, including a failed one, is spent. |
+| Manifest | `manifest.json` is written at once with status `STARTED` (`VALIDATED` for `run_load`), and replaced at each later step. |
+| Archive | Each source file that exists and is a regular file is streamed into `source/`, hashing the bytes read; the copy is hashed again. A missing or unreadable file is recorded with an `error`. |
+| Validate | `run_conversion` only. A `SourceValidationError` (RUN-01 to RUN-06) makes the run `FAILED` at stage `validation`, with every issue in `validation.issues`, and raises `SourceRunFailedError`. No `data/conversion/<run_id>/` directory or database is created. |
+| Verify (RUN-08) | The archived checksums must equal `plan.source_checksums`, which the planner recorded. Otherwise the run is `FAILED` (`verify_source`, RUN-08) before any database exists, and the archive keeps the changed bytes. |
+| Loading | `LOADING`, `database_transaction: in_progress`, and the database path are written **before** `load_plan` starts. |
+| Load | `load_plan` as above. A RUN-07 refusal for the database directory or a `LoadFailedError` is recorded as `FAILED` with the step (`reserve_database`, `create_schema`, `insert_borrowers`, `insert_applications`, `insert_parties`, or `commit`), or as `UNKNOWN` if read-back does not confirm the rollback. |
+| Read-back | The database is then opened read-only (`mode=ro`, `PRAGMA query_only`) to count LOS rows, sum `requested_amount`, and hash the file, after success and after a failure alike. |
+| Finish | `reports/load_result.json` and the final manifest. Status is `LOADED`, with `ready_for_reconciliation: true`, only after the load committed and both files were written. |
+
+The manifest records the run `status`, the `database_transaction` state, and the `evidence.state`
+separately. Every JSON file is written to a temporary file in the same directory, flushed with
+`fsync`, and moved into place with `os.replace`, so an interrupted write leaves the previous
+version. Failures raise `SourceRunFailedError` or `LoadRunFailedError` (both `RunFailedError`, with
+`stage`, `step`, `rule`, and `reason`) after the evidence is written. Any other exception,
+including `KeyboardInterrupt`, is settled by inspecting the database read-only (`FAILED` with
+outcome `interrupted` if no business rows exist, `UNKNOWN` if that cannot be verified) and is then
+re-raised.
+
+**Evidence failure after commit.** If the load commits but the read-back, report, or final manifest
+fails, the committed database is left exactly as it is. The manifest stays `LOADING` and, where it
+can still be written, records `database_transaction: committed`, `evidence.state: incomplete`, and
+`ready_for_reconciliation: false`. `EvidenceIncompleteError` is raised. Three functions then
+operate on the evidence only, never on the database:
+
+| Function | Behavior |
+| --- | --- |
+| `recover_run(run_id)` | Settles a `STARTED`, `VALIDATED`, `LOADING`, or `UNKNOWN` run. Classifies the run's database read-only: exactly the planned counts and amount, with no `-journal`/`-wal` file, gives `LOADED` (report rewritten, marked recovered); no database or no business rows gives `FAILED` (unless the run was recorded as committed); anything else gives `UNKNOWN` with evidence `unverified`. A final run is returned unchanged. |
+| `fail_run(run_id, reason)` | Formally fails a non-final run (for example `UNKNOWN`) with step `formally_failed`. Refuses a run that is already `LOADED` or `FAILED`. |
+| `check_ready(run_id)` | Lists every reason a run is not ready for reconciliation: status, transaction, evidence state, ready flag, source verification, the load report, and the database checksum. |
+
+None of them reloads data, re-runs a run ID, or writes to a database. There is no command-line
+entry point for them yet.
+
+**Manual verification (Windows PowerShell, from the project root):**
+
+```powershell
+# 1. Record the development database checksum (it must not change).
+$dev = (Get-FileHash data\loan_lab_dev.db).Hash
+
+# 2. Plan and load the sample extract into a new run.
+python -m loan_lab.conversion.legacy sample_data\legacy --run-id manual-check-1
+#    Expect: Borrowers 16 read / 11 loaded / 1 excluded / 4 rejected,
+#            Applications 13 / 6 / 2 / 5, Parties 20 / 10 / 3 / 7,
+#            requested amount loaded 2281000.00, and WN-01 customers 00010008, 00010009, 00010015.
+
+# 3. Query the new database independently.
+@'
+import sqlite3
+db = sqlite3.connect("file:data/conversion/manual-check-1/loan_lab_conversion.db?mode=ro", uri=True)
+for table in ("borrower", "loan_application", "application_party"):
+    print(table, db.execute(f"SELECT count(*) FROM {table}").fetchone()[0])
+print("requested", db.execute("SELECT sum(requested_amount) FROM loan_application").fetchone()[0])
+print(db.execute("SELECT source_system, source_system_id, requested_amount, interest_rate "
+                 "FROM loan_application ORDER BY id LIMIT 1").fetchone())
+'@ | python -
+#    Expect: 11, 6, 10; requested 228100000 (ExactDecimal stores cents as an integer);
+#            ('LEGACY_LOS', '0000500101', 125000000, 65000), i.e. 1,250,000.00 at 6.5000%.
+
+# 4. Inspect the evidence package.
+Get-ChildItem -Recurse -File output\conversion\manual-check-1 | Select-Object FullName
+Get-Content output\conversion\manual-check-1\reports\load_result.json
+#    Expect: manifest.json, reports\load_result.json, and the four files under source\;
+#            "success": true, "loaded" 11 / 6 / 10 with "requested_amount": "2281000.00",
+#            and both transactions "committed". In manifest.json: "status": "LOADED" and
+#            "verified": true for every source file.
+
+# 5. The archived copies match the original files.
+Get-ChildItem sample_data\legacy | ForEach-Object {
+    (Get-FileHash $_.FullName).Hash -eq (Get-FileHash "output\conversion\manual-check-1\source\$($_.Name)").Hash
+}   # True four times
+
+# 6. Reusing the run ID is refused (exit code 3, RUN-07) and nothing changes.
+python -m loan_lab.conversion.legacy sample_data\legacy --run-id manual-check-1; $LASTEXITCODE
+
+# 7. The development database is untouched.
+(Get-FileHash data\loan_lab_dev.db).Hash -eq $dev   # True
+
+# 8. An invalid extract still leaves a FAILED run, but no database.
+python -m loan_lab.conversion.legacy missing-folder --run-id manual-check-2; $LASTEXITCODE
+#    Expect: exit code 2 and RUN-01 for each file.
+Get-Content output\conversion\manual-check-2\manifest.json
+#    Expect: "status": "FAILED", "failure" stage "validation", the RUN-01 issues under
+#            "validation", and "database_transaction": "not_started".
+Test-Path data\conversion\manual-check-2   # False
+
+# 9. Readiness and recovery (library functions; no CLI yet).
+@'
+from loan_lab.conversion.legacy import check_ready, recover_run
+print(check_ready("manual-check-1"))
+print(recover_run("manual-check-1"))
+'@ | python -
+#    Expect: problems=() for the loaded run, and "The run is already final." with changed=False.
+```
+
+Exit codes: 0 loaded, 2 source validation failure (evidence only, no database), 3 RUN-07 refusal,
+4 load failure (rolled back, or unverified), 5 source changed since planning (RUN-08), 6 the load
+committed but its evidence is incomplete (recover the run). Remove `data\conversion\manual-check-1`
+and `output\conversion\manual-check-1` and `manual-check-2` by hand when they are no longer needed.
+
+Reconciliation, the exception, exclusion, warning, and unmapped-field reports, `run.log`, and
+release approval are not implemented. The source files are only read, never moved or modified.
 
 ### Validation (`loan_lab.validation`)
 
@@ -496,7 +627,8 @@ Server-rendered pages over the development database (`data/loan_lab_dev.db`):
 Implemented: the application skeleton, `GET /health`, and the LOS data model (`Borrower`,
 `LoanApplication`, `ApplicationParty`, `Collateral`, `CollateralPledge`, `Lien`) with exact decimal
 storage, the deterministic synthetic data generator (`loan_lab.synthetic`), and a read-only
-web interface (`loan_lab.web`), and phase 1 of the legacy conversion (validation and mapping into
-a conversion plan, `loan_lab.conversion.legacy`). Not yet implemented: authentication, editing,
+web interface (`loan_lab.web`), and phases 1 and 2 of the legacy conversion
+(`loan_lab.conversion.legacy`): validation and mapping into a conversion plan, then transactional
+loading into an isolated per-run database. Not yet implemented: authentication, editing,
 database migrations, workflow validation and status transitions, collateral policy and LTV,
-conversion loading, reconciliation, and release approval.
+conversion reconciliation, run reports, and release approval.

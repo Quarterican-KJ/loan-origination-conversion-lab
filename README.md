@@ -34,7 +34,7 @@ A Python learning lab that simulates two things found in banking technology:
 │       ├── paths.py         # Project-root and default database path resolution
 │       ├── models/          # SQLAlchemy models: borrowers, applications, collateral, liens
 │       ├── synthetic/       # Deterministic synthetic data generator + seeding CLI
-│       ├── conversion/      # Legacy extract/transform/load (future)
+│       ├── conversion/      # Legacy CSV conversion: validate, map, and load (no reconciliation yet)
 │       ├── validation/      # Data validation rules (future)
 │       ├── reconciliation/  # Source-to-target reconciliation (future)
 │       └── web/             # Read-only LOS interface: routes, queries, templates, static CSS/JS
@@ -153,6 +153,37 @@ repository root:
 Remove-Item data\loan_lab_dev.db
 ```
 
+## Convert the sample legacy extract
+
+Validates `sample_data\legacy`, then loads the eligible records into a new, isolated database at
+`data\conversion\<run_id>\loan_lab_conversion.db`. It never touches `data\loan_lab_dev.db`, and it
+refuses to reuse an existing run ID. There is no overwrite option.
+
+```powershell
+python -m loan_lab.conversion.legacy sample_data\legacy --run-id manual-check-1
+```
+
+Each run keeps its evidence in `output\conversion\<run_id>\` (git-ignored):
+
+| Path | Contents |
+| --- | --- |
+| `manifest.json` | Run ID, UTC timestamps, status (`STARTED`, `VALIDATED`, `LOADING`, `LOADED`, `FAILED`, or `UNKNOWN`), the database transaction state and evidence state (recorded separately), whether the run is ready for reconciliation, source checksums, validation counts or run-level errors, expected target counts and amount, database checksum, and the failure stage, step, and reason |
+| `source\` | Exact copies of the source files that could be read, checked against the checksums taken at planning |
+| `reports\load_result.json` | Written once a load was attempted: counts and requested amount read back from the database (amounts as decimal strings), transaction states, and failure details |
+
+The run folder is reserved before the source is validated, so an invalid extract still leaves a
+`FAILED` manifest and its archived files, but no database. Run IDs are never reused, even after a
+failure. If a source file changes between planning and loading, the run fails with RUN-08 and
+nothing is loaded.
+
+If the load commits but its evidence cannot be completed, the run stays `LOADING`, is not ready for
+reconciliation, and the command exits with code 6. `recover_run` then inspects the database
+read-only and marks the run `LOADED`, `FAILED`, or `UNKNOWN` (when the outcome cannot be verified);
+`fail_run` formally fails an `UNKNOWN` run, and `check_ready` reports whether a run may proceed.
+None of them reloads data or modifies a database. Reconciliation and release approval are not
+implemented yet. See the manual verification procedure in
+[docs/architecture.md](docs/architecture.md).
+
 ## Run the tests
 
 ```powershell
@@ -162,7 +193,8 @@ python -m pytest
 ## Status
 
 Implemented: the `GET /health` endpoint, the LOS data model (borrowers, applications, parties,
-collateral, pledges, liens), the synthetic data generator, and a read-only LOS web interface.
+collateral, pledges, liens), the synthetic data generator, a read-only LOS web interface, and
+legacy conversion validation, mapping, and transactional loading with per-run evidence.
 Not yet implemented: authentication, editing, database migrations, workflow validation,
-conversion, and reconciliation. See
+conversion reconciliation, and release approval. See
 [docs/architecture.md](docs/architecture.md) for the design and its current limitations.

@@ -181,6 +181,13 @@ class ConversionPlan:
     units: tuple[ApplicationUnit, ...]
     amounts: AmountTotals
     unmapped_fields: tuple[UnmappedField, ...]
+    # SHA-256 of extract_control.csv; ``checksums`` covers the three data files.
+    control_sha256: str
+
+    @property
+    def source_checksums(self) -> Mapping[str, str]:
+        """SHA-256 of all four source files, as read for planning."""
+        return MappingProxyType({**self.checksums, contract.CONTROL_FILE: self.control_sha256})
 
     def rows(self, file: str) -> tuple[RowResult, ...]:
         return {
