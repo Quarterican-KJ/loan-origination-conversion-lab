@@ -19,9 +19,12 @@ from loan_lab.conversion.legacy.loader import (
     new_run_id,
 )
 from loan_lab.conversion.legacy.plan import Disposition
+from loan_lab.conversion.legacy.reports import REPORT_KINDS
 from loan_lab.conversion.legacy.run import (
+    REPORTS_DIRECTORY,
     EvidenceIncompleteError,
     LoadRunFailedError,
+    ReportRunFailedError,
     SourceRunFailedError,
     run_conversion,
 )
@@ -33,6 +36,7 @@ EXIT_TARGET_NOT_NEW = 3
 EXIT_LOAD_FAILED = 4
 EXIT_SOURCE_CHANGED = 5
 EXIT_EVIDENCE_INCOMPLETE = 6
+EXIT_REPORTS_FAILED = 11
 
 LABELS = {
     contract.BORROWERS_FILE: "Borrowers",
@@ -93,6 +97,9 @@ def main(argv: list[str] | None = None) -> int:
         for issue in error.issues:
             print(f"  {issue}", file=sys.stderr)
         return EXIT_SOURCE_INVALID
+    except ReportRunFailedError as error:
+        print(str(error), file=sys.stderr)
+        return EXIT_REPORTS_FAILED
     except LoadRunFailedError as error:
         print(str(error), file=sys.stderr)
         return {
@@ -121,6 +128,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  Requested amount loaded: {run.database.requested_amount}")
     standalone = ", ".join(result.borrowers_without_relationships) or "none"
     print(f"  Customers without a converted application (WN-01): {standalone}")
+    reports = ", ".join(f"{REPORTS_DIRECTORY}/{kind.file_name}" for kind in REPORT_KINDS)
+    print(f"  Reports: {reports}")
     print("  Reconciliation has not run; this run is not releasable. Reconcile it with:")
     print(f"  python -m loan_lab.conversion.legacy.reconcile_cli {run_id}")
     return EXIT_OK

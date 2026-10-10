@@ -104,6 +104,7 @@ happens to the run.
 | **Record rejection** | One source row, or one conversion unit (section 8.2) | A record rule (SV, MP, or RF) | That row, or that unit, is not loaded. Other records continue. | None by itself. The run can still pass. | `exceptions.csv` |
 | **Intentional exclusion** | One source row | An exclusion rule (EX) | The row is not loaded. This is not an error. | None | `exclusions.csv` |
 | **Load failure** | Whole load | The RUN-07 or RUN-08 precondition (section 9.1), or a database or converter error during schema creation, insert, or commit | RUN-07 and RUN-08: nothing is written to any existing file or database. Otherwise the transaction rolls back, so no converted rows are committed. | `FAILED` at stage `load`, or `UNKNOWN` if the database does not confirm the rollback | `manifest.json` and `reports/load_result.json` with the failing step, the error, the planned counts and amount, transaction states, and the rows found in the database afterwards |
+| **Report failure** | Whole run | The exception, exclusion, or warning report cannot be built, disagrees with the plan's row accounting, or cannot be written and verified | Nothing is loaded and no target database is created. Report files already written are kept. | `FAILED` at stage `reports`, evidence `incomplete` | `manifest.json` with the `reports` record (`state: failed`, the error, and any files written) |
 | **Reconciliation failure** | Whole run | Any reconciliation rule (RC-01 to RC-10) does not match | Committed rows are **kept unchanged** for troubleshooting but cannot be released. | `FAILED` at stage `reconciliation` | `reports/reconciliation.json` with a discrepancy record (rule, source file, line and key, target table and ID, field, expected and actual values) for every mismatch |
 | **Release approval** | Whole run | A named reviewer's sign-off after reconciliation passes | The conversion database is accepted as the run's output. | `RELEASED` | Approval record in the run manifest |
 
@@ -137,8 +138,8 @@ stateDiagram-v2
 
 `FAILED`, `RELEASED`, and `DECLINED` are final. A failed or declined run is never resumed or
 patched. After the cause is fixed, a **new run** starts with a new run ID and a new, empty
-conversion database. `FAILED` always records the failing stage: `validation`, `load`, or
-`reconciliation`.
+conversion database. `FAILED` always records the failing stage: `validation`, `reports`
+(section 13.1), `load`, or `reconciliation`.
 
 **Run status, database transaction, and evidence are recorded separately.** The manifest keeps
 three independent facts, so a reporting failure can never make a committed load look as if it
@@ -906,12 +907,12 @@ directory is overwritten by a later run.
 
 | File | Contents |
 | --- | --- |
-| `manifest.json` | Run ID; start, last-update, and end times (UTC); status, database transaction state, evidence state, and readiness for reconciliation (section 2.2); failure (stage, step, rule, reason), if any; specification version; source directory; for each source file the planned, read, and archived SHA-256, its size, and whether they agree; validation summary (control totals, row counts by disposition, requested amounts by disposition), or the run-level issues if validation failed; expected target counts and amount; the conversion database's path, tables, and SHA-256; load outcome; the reconciliation record (result, report, time, database SHA-256, failed rules, discrepancy count, and whether release review is awaiting approval or blocked); the release approval record (empty until implemented) |
+| `manifest.json` | Run ID; start, last-update, and end times (UTC); status, database transaction state, evidence state, and readiness for reconciliation (section 2.2); failure (stage, step, rule, reason), if any; specification version; source directory; for each source file the planned, read, and archived SHA-256, its size, and whether they agree; validation summary (control totals, row counts by disposition, requested amounts by disposition), or the run-level issues if validation failed; expected target counts and amount; the `reports` record with each report's checksum and counts (section 13.1); the conversion database's path, tables, and SHA-256; load outcome; the reconciliation record (result, report, time, database SHA-256, failed rules, discrepancy count, and whether release review is awaiting approval or blocked); the release approval record (empty until implemented) |
 | `source/` | Byte-for-byte copies of the source files that could be read, verified against the plan (RUN-08) when one exists |
 | `reports/load_result.json` | Written once a load was attempted. The load outcome: success, failure, or unverified; expected counts and amount, the counts and requested amount **read back from the database** afterwards (amounts as decimal strings), rows inserted, the state of the schema and load transactions, whether any business rows were committed, the database checksum, and the failing step and error |
-| `exceptions.csv` | Record rejections |
-| `exclusions.csv` | Intentional exclusions |
-| `warnings.csv` | Warnings (WN-01) |
+| `reports/exceptions.csv` | Record rejections, including dependent rejections. Written once validation passes, before any load. |
+| `reports/exclusions.csv` | Intentional exclusions, own-rule and dependent. Written with `exceptions.csv`. |
+| `reports/warnings.csv` | Nonblocking warnings (WN-01). Written with `exceptions.csv`. |
 | `unmapped_fields.csv` | The inventory of intentionally unmapped fields (section 6.1) |
 | `reports/reconciliation.json` | Results for RC-01 to RC-10 (items checked, discrepancies, notes); row totals by disposition; requested amounts (source, control, loaded, excluded, rejected, target) as decimal strings; expected and actual distributions; expected and actual (`CUST_NO`, role) sets for every loaded application; the customers without converted applications with their relationships' dispositions; every discrepancy; a final PASS or FAIL; and the `attempt` ID that the manifest's finalized record must match (section 12.2). It is never overwritten once written. |
 | `run.log` | Stage-by-stage log, including the database error for a load failure |
@@ -952,9 +953,39 @@ created**.
   `business_rows_committed` is `true`, `false`, or `null` (unknown). A recovered report records
   what recovery found under `recovered`.
 
-Not yet implemented: `exceptions.csv`, `exclusions.csv`, `warnings.csv`, `unmapped_fields.csv`,
-and `run.log`. Recovery and formal failure are library functions only; there is no command-line
-entry point for them yet.
+Not yet implemented: `unmapped_fields.csv` and `run.log`. Recovery and formal failure are
+library functions only; there is no command-line entry point for them yet.
+
+### 13.1 Exception, exclusion, and warning reports
+
+The three record reports are generated from the validated conversion plan, never from the
+database, and written to `reports/` once validation passes and **before** the load starts. When
+a pre-built plan is loaded (`run_load`), they are written as soon as the plan is recorded, before
+the source is archived and verified. Runs whose manifest predates them (manifest version
+below 3, such as `DEMO-001` and the earlier scenario runs) have no reports and are not changed.
+
+- **Accounting.** Before anything is written, each report is checked against the plan: the set
+  of (file, line) pairs in `exceptions.csv` equals the rejected and dependent-rejected rows, the
+  set in `exclusions.csv` equals the excluded and dependent-excluded rows, each row's rules and
+  `DEPENDENT` flag match its disposition, no source line appears in both, `exceptions.csv` has
+  exactly one row per rejection issue, and `warnings.csv` holds exactly the plan's warnings, whose
+  WN-01 keys equal the customers without converted applications (section 8.4). Any mismatch fails
+  the run and writes no report.
+- **Exact values.** `SOURCE_KEY`, `UNIT_KEY`, `SOURCE_VALUE`, and `SOURCE_LINE` are the source
+  text as read: never trimmed, padded, or repaired. `LINE_NO` is the physical line in the file.
+  Files are UTF-8 without a BOM, with CRLF line endings and standard CSV quoting.
+- **Writing.** Each file is written atomically (section 13, "How evidence is written") and read
+  back to confirm its SHA-256. The manifest's `reports` record holds `state` (`not_started`,
+  `in_progress`, `complete`, or `failed`), the column list, the error if any, and for each report
+  its path, SHA-256, size, row count, rows per source file, dependent rows per source file, and
+  rows per rule. The record is `complete` only after all three files are written and verified.
+- **Failure.** If a report cannot be built or written, the run is `FAILED` at stage `reports`,
+  step `write_reports`, with evidence `incomplete`. No database is created, files already written
+  are kept, and the command line exits with code 11.
+- **Readiness.** For a version 3 manifest, `check_ready` and reconciliation refuse a run whose
+  `reports` record is not `complete`, whose files are missing, are links, or no longer match their
+  recorded SHA-256, or whose recorded counts disagree with the validation summary. They do not
+  re-derive the report contents from the source.
 
 **`exceptions.csv`** has one row per failure. A record with several failures has several rows.
 
@@ -971,10 +1002,19 @@ entry point for them yet.
 | `FIELD` | `CUST_NO` |
 | `SOURCE_VALUE` | `00010099` |
 | `MESSAGE` | `Customer 00010099 is not in borrowers.csv.` |
+| `REMEDIATION` | `Add the customer to the extract, or correct CUST_NO; no placeholder is created.`: fixed guidance for the rule. Corrections are made in the legacy system or extract, never by the converter. |
 | `SOURCE_LINE` | `0000500109,00010099,GTR`: the raw source line |
 
 **`exclusions.csv`** and **`warnings.csv`** have the same columns, with `STAGE` = `exclusion` or
-`warning`.
+`warning`. In `exclusions.csv`, `DEPENDENT` = `Y` marks a row excluded only because its unit was
+excluded (EX-05), with `ROOT_CAUSE` pointing to the unit's own exclusion. `warnings.csv` rows are
+never dependent; for WN-01, `ROOT_CAUSE` lists the rule and source line that removed each
+relationship naming the customer (for example `RF-05 application_parties.csv:14; EX-05
+application_parties.csv:17`), and `MESSAGE` lists those applications with their dispositions.
+
+For the sample extract (section 15) the reports hold 18 exceptions (borrowers 4, applications 7,
+parties 7, of which 3 are dependent RF-05 rows), 6 exclusions (EX-01 to EX-04 once each and two
+dependent EX-05 rows), and 3 WN-01 warnings (`00010008`, `00010009`, `00010015`).
 
 ## 14. Worked examples
 

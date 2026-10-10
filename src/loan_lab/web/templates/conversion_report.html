@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+{% import "_conversion.html" as c with context %}
+{% block title %}{{ view.title }} · {{ run.run_id }}{% endblock %}
+{% block breadcrumbs %}<a href="{{ url_for('dashboard') }}">Dashboard</a><span class="sep">/</span><a href="{{ url_for('conversions') }}">Conversions</a><span class="sep">/</span><a href="{{ url_for('conversion', run_id=run.run_id) }}">{{ c.run_id(run.run_id) }}</a><span class="sep">/</span><span aria-current="page">{{ view.title }}</span>{% endblock %}
+{% block content %}
+{{ c.run_header(run, "reports", success_notice=false) }}
+
+<nav class="tabs report-tabs" aria-label="Reports">
+  {% for kind in report_kinds %}
+  {% set file = run.reports.files | selectattr("kind", "equalto", kind) | first if run.reports and run.reports.files else none %}
+  <a class="button {% if kind != view.kind %}button-ghost{% endif %}" href="{{ url_for('conversion_report', run_id=run.run_id, kind=kind.value) }}" {% if kind == view.kind %}aria-current="page"{% endif %} data-report-tab="{{ kind.value }}">{{ kind.value | label }}{% if file and file.rows is not none %} <span class="count">{{ file.rows | number }}</span>{% endif %}</a>
+  {% endfor %}
+</nav>
+
+<section class="panel" aria-labelledby="report-title">
+  <header class="panel-header">
+    <h2 id="report-title">{{ view.title }} <code class="muted">{{ view.file.path }}</code></h2>
+    {% if view.available %}<a class="button button-ghost" href="{{ url_for('conversion_report_download', run_id=run.run_id, kind=view.kind.value) }}" download data-download>Download CSV</a>{% endif %}
+  </header>
+  <p class="panel-intro">{{ view.description }}</p>
+
+  {% if not view.available %}
+  <div class="notice{% if run.reports and run.reports.state not in ('not_produced', 'not_started') %} notice-danger{% endif %}" role="status" data-report-available="false">
+    <strong>This report cannot be shown.</strong>
+    <ul class="problems">{% for problem in view.problems %}<li>{{ problem }}</li>{% endfor %}</ul>
+    {% if run.reports and run.reports.error %}<p>Recorded error: {{ run.reports.error }}</p>{% endif %}
+  </div>
+  {% else %}
+  <form class="filters" method="get" action="{{ url_for('conversion_report', run_id=run.run_id, kind=view.kind.value) }}" data-auto-submit>
+    <div class="field field-grow">
+      <label for="report-q">Search</label>
+      <input id="report-q" type="search" name="q" value="{{ view.filters.q }}" maxlength="{{ max_query }}" placeholder="Key, value, message or source line">
+    </div>
+    <div class="field">
+      <label for="report-file">File</label>
+      <select id="report-file" name="file">
+        <option value="">All files</option>
+        {% for name in CONVERSION_DATA_FILES %}<option value="{{ name }}" {% if view.filters.file == name %}selected{% endif %}>{{ name }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label for="report-rule">Rule</label>
+      <select id="report-rule" name="rule">
+        <option value="">All rules</option>
+        {% for rule in view.rules %}<option value="{{ rule }}" {% if view.filters.rule == rule %}selected{% endif %}>{{ rule }}</option>{% endfor %}
+      </select>
+    </div>
+    {% if view.kind.value != "warnings" %}
+    <div class="field">
+      <label for="report-dependent">Dependent</label>
+      <select id="report-dependent" name="dependent">
+        <option value="">All rows</option>
+        <option value="N" {% if view.filters.dependent == "N" %}selected{% endif %}>Own failure only (N)</option>
+        <option value="Y" {% if view.filters.dependent == "Y" %}selected{% endif %}>Dependent only (Y)</option>
+      </select>
+    </div>
+    {% endif %}
+    <div class="field-actions">
+      <button class="button" type="submit">Apply</button>
+      <a class="button button-ghost" href="{{ url_for('conversion_report', run_id=run.run_id, kind=view.kind.value) }}">Clear</a>
+    </div>
+  </form>
+
+  <p class="muted report-count" role="status" data-matched="{{ view.matched }}" data-total="{{ view.total }}">
+    {% if view.filters.active %}{{ view.matched | number }} of {{ view.total | number }} rows match{% else %}{{ view.total | number }} rows{% endif %}{% if view.truncated %}; showing the first {{ max_rows | number }}. Narrow the filters or download the CSV to see every row{% endif %}.
+  </p>
+
+  {% if view.rows %}
+  {% call c.scroll(view.title ~ " report") %}
+  <table class="table table-compact report-table" data-report-table>
+    <thead>
+      <tr>
+        <th scope="col" class="col-source">Source</th>
+        <th scope="col" class="col-key">Key</th>
+        <th scope="col">Unit</th>
+        <th scope="col">Rule</th>
+        {% if view.kind.value != "warnings" %}<th scope="col" title="Y: the row has no failure of its own; it follows its related record.">Dependent</th>{% endif %}
+        <th scope="col">Root cause</th>
+        <th scope="col">Field and value</th>
+        <th scope="col">Message</th>
+        <th scope="col">Remediation</th>
+        <th scope="col" class="col-source-line">Source line</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in view.rows %}
+      <tr data-report-row data-rule="{{ row.rule }}" data-dependent="{{ row.dependent }}">
+        <td class="nowrap col-source"><code>{{ row.file }}:{{ row.line }}</code></td>
+        <td class="col-key">{% if row.source_key %}{{ c.raw_value(row.source_key, "source-key", "Source key") }}{% else %}<span class="muted">—</span>{% endif %}</td>
+        <td>{% if row.unit_key %}{{ c.raw_value(row.unit_key, "unit-key", "Unit key") }}{% else %}<span class="muted">—</span>{% endif %}</td>
+        <td class="nowrap"><code>{{ row.rule }}</code> <span class="muted">{{ row.stage | label }}</span></td>
+        {% if view.kind.value != "warnings" %}<td data-field="dependent">{% if row.dependent == "Y" %}<span class="badge">Dependent</span>{% else %}<span class="muted">Own</span>{% endif %}</td>{% endif %}
+        <td class="refs" data-field="root-cause">{% if row.root_cause %}{{ c.refs(row.root_cause) }}{% else %}<span class="muted">—</span>{% endif %}</td>
+        <td class="nowrap" data-field="field-and-value">{% if row.field %}<code>{{ row.field }}</code>: {{ c.raw_value(row.source_value, "source-value", "Source value") }}{% else %}<span class="muted">—</span>{% endif %}</td>
+        <td class="wrap">{{ row.message | truncate(2000, true, "…", 0) }}</td>
+        <td class="wrap">{{ row.remediation }}</td>
+        <td class="col-source-line">{% if row.source_line %}{{ c.raw_value(row.source_line, "source-line", "Source line", limit=40, disclose=true) }}{% else %}<span class="muted">—</span>{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endcall %}
+  {% else %}
+  <p class="empty" data-empty>{% if view.filters.active %}No rows match the current filters.{% else %}This report has no rows.{% endif %}</p>
+  {% endif %}
+  <p class="footnote panel-footnote">Values are shown exactly as extracted; an empty or whitespace-only value shows as <span class="blank-value">Blank value</span>, and <span class="muted">—</span> means nothing applies. Values longer than the column, and every source line, show a one-line preview: open it to see and copy the complete value. The download is a spreadsheet-safe copy: values a spreadsheet could run as formulas start with <code>'</code>. The archived report in the run's evidence directory is never changed.</p>
+  {% endif %}
+</section>
+{% endblock %}

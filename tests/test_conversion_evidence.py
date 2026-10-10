@@ -149,7 +149,10 @@ def test_successful_run_produces_the_evidence_package(ws: Workspace) -> None:
     assert result.evidence_directory == ws.evidence()
     assert files_under(ws.evidence()) == [
         "manifest.json",
+        "reports/exceptions.csv",
+        "reports/exclusions.csv",
         "reports/load_result.json",
+        "reports/warnings.csv",
         *(f"source/{name}" for name in sorted(SOURCE_FILES)),
     ]
     assert files_under(ws.databases) == [f"run-1/{DATABASE_NAME}"]

@@ -34,6 +34,7 @@
 <div class="grid-2">
   <section class="panel" aria-labelledby="by-product">
     <header class="panel-header"><h2 id="by-product">Product distribution</h2></header>
+    <div class="table-scroll" role="region" aria-label="Product distribution">
     <table class="table">
       <thead>
         <tr><th scope="col">Product</th><th scope="col" class="num">Applications</th><th scope="col">Share</th><th scope="col" class="num">Requested volume</th></tr>
@@ -49,10 +50,12 @@
         {% endfor %}
       </tbody>
     </table>
+    </div>
   </section>
 
   <section class="panel" aria-labelledby="by-status">
     <header class="panel-header"><h2 id="by-status">Status breakdown</h2></header>
+    <div class="table-scroll" role="region" aria-label="Status breakdown">
     <table class="table">
       <thead>
         <tr><th scope="col">Status</th><th scope="col" class="num">Applications</th><th scope="col">Share</th><th scope="col" class="num">Requested volume</th></tr>
@@ -68,6 +71,7 @@
         {% endfor %}
       </tbody>
     </table>
+    </div>
   </section>
 </div>
 {% endblock %}

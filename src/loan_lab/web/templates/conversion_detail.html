@@ -179,7 +179,20 @@
         </dd>
       </div>
     </dl>
-    <p class="footnote panel-footnote">The exception, exclusion, and warning reports are not produced yet; these figures come from the manifest's validation summary.</p>
+    {% set reports = run.reports %}
+    <dl class="facts" data-section="reports">
+      <div class="fact-wide"><dt>Reports</dt><dd data-field="reports-state">{{ c.report_state(reports) }}</dd></div>
+      {% if reports and reports.files and reports.state != "not_produced" %}
+      {% for file in reports.files %}
+      <div data-report="{{ file.kind.value }}">
+        <dt>{{ file.title }}</dt>
+        <dd>{% if reports.available %}<a href="{{ url_for('conversion_report', run_id=run.run_id, kind=file.kind.value) }}">{{ c.count(file.rows) }} rows</a>{% elif file.recorded %}{{ c.count(file.rows) }} rows{% if file.check not in (none, "matches") %} <span class="unknown">({{ file.check | label | lower }})</span>{% endif %}{% else %}{{ c.na("Not recorded in the manifest.") }}{% endif %}</dd>
+      </div>
+      {% endfor %}
+      {% endif %}
+    </dl>
+    {% if reports and reports.error %}<p class="footnote panel-footnote" data-field="reports-error">Report error: {{ reports.error }}</p>{% endif %}
+    <p class="footnote panel-footnote">The figures above come from the manifest's validation summary. Each report is checked against it and against the checksum recorded when it was written.</p>
   </section>
 
   <section class="panel" aria-labelledby="reconciliation-summary">

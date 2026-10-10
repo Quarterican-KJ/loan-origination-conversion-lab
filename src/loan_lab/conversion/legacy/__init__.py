@@ -43,6 +43,7 @@ from loan_lab.conversion.legacy.reconcile import (
     reconcile_run,
     verify_reconciliation,
 )
+from loan_lab.conversion.legacy.reports import ReportKind, ReportState, build_reports
 from loan_lab.conversion.legacy.run import (
     ArchivedSource,
     DatabaseState,
@@ -54,6 +55,7 @@ from loan_lab.conversion.legacy.run import (
     Readiness,
     ReconciliationState,
     RecoveryResult,
+    ReportRunFailedError,
     RunFailedError,
     RunStatus,
     SourceChangedError,
@@ -109,6 +111,9 @@ __all__ = [
     "ReconciliationRule",
     "ReconciliationState",
     "RecoveryResult",
+    "ReportKind",
+    "ReportRunFailedError",
+    "ReportState",
     "RuleResult",
     "RunFailedError",
     "RunIssue",
@@ -122,6 +127,7 @@ __all__ = [
     "TransactionState",
     "UnmappedField",
     "build_plan",
+    "build_reports",
     "check_ready",
     "fail_run",
     "load_plan",

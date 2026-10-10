@@ -560,6 +560,38 @@ def test_static_assets_are_served(client: TestClient, path: str, content_type: s
     assert content_type in response.headers["content-type"]
 
 
+@pytest.mark.parametrize("path", ["/static/css/app.css", "/static/js/app.js", "/static/js/theme.js"])
+def test_static_assets_are_revalidated_not_reused_stale(client: TestClient, path: str) -> None:
+    # Without Cache-Control, browsers may keep running a heuristically cached copy after the
+    # file changes, without asking the server.
+    response = client.get(path)
+    assert response.headers["cache-control"] == "no-cache"
+
+    revalidated = client.get(path, headers={"If-None-Match": response.headers["etag"]})
+    assert revalidated.status_code == 304
+    assert revalidated.headers["cache-control"] == "no-cache"
+
+
+def test_pages_request_assets_by_content_version(client: TestClient) -> None:
+    html = client.get("/").text
+    static = Path(__file__).parents[1] / "src" / "loan_lab" / "web" / "static"
+    for path in ("css/app.css", "js/app.js", "js/theme.js"):
+        version = hashlib.sha256((static / path).read_bytes()).hexdigest()[:12]
+        assert f'/static/{path}?v={version}"' in html
+
+
+def test_asset_version_changes_with_content(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from loan_lab.web import templating
+
+    monkeypatch.setattr(templating, "STATIC_DIR", tmp_path)
+    asset = tmp_path / "app.js"
+    asset.write_text("old", encoding="utf-8")
+    before = templating.asset_version("app.js")
+    asset.write_text("newer", encoding="utf-8")
+
+    assert templating.asset_version("app.js") != before
+
+
 def test_layout_defaults_to_dark_theme_with_persistent_toggle(client: TestClient) -> None:
     html = client.get("/").text
 

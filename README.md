@@ -83,6 +83,7 @@ Then open:
 | Conversion runs found in `output\conversion` | <http://127.0.0.1:8000/conversions> |
 | Conversion run summary: status, source checksums, row dispositions, totals, warnings | <http://127.0.0.1:8000/conversions/manual-check-1> |
 | Reconciliation: RC-01 to RC-10 and field-level discrepancies | <http://127.0.0.1:8000/conversions/manual-check-1/reconciliation> |
+| Exception, exclusion, and warning reports: search, file/rule/dependent filters, CSV download | <http://127.0.0.1:8000/conversions/manual-check-1/reports/exceptions> |
 | Health check → `{"status":"ok"}` | <http://127.0.0.1:8000/health> |
 | Interactive API docs | <http://127.0.0.1:8000/docs> |
 
@@ -98,8 +99,11 @@ Notes:
 - **Theme.** Dark by default; use the sun/moon button in the top bar to switch. The choice is
   saved in the browser's local storage.
 - Collateral without an appraisal shows its value as **Unknown**, never `$0`.
-- **Conversion Management** reads each run's `manifest.json`, `reports\load_result.json`, and
-  `reports\reconciliation.json` (see [Convert the sample legacy extract](#convert-the-sample-legacy-extract)).
+- **Conversion Management** reads each run's `manifest.json`, `reports\load_result.json`,
+  `reports\reconciliation.json`, and the three record reports (see [Convert the sample legacy extract](#convert-the-sample-legacy-extract)).
+  A report is shown or downloaded only if it matches the checksum and row count in the manifest.
+  Values are shown exactly as extracted; the download prefixes values a spreadsheet could run as
+  a formula (starting with `=`, `+`, `-`, `@`) with `'`, while the archived report is unchanged.
   It never opens a conversion database or `loan_lab_dev.db` and never writes evidence. Missing
   evidence shows as **Not available**, never zero or PASS. Each run shows its recorded status
   and, separately, whether the evidence is trusted. Incomplete, conflicting, or unverified
@@ -181,6 +185,9 @@ Each run keeps its evidence in `output\conversion\<run_id>\` (git-ignored):
 | --- | --- |
 | `manifest.json` | Run ID, UTC timestamps, status (`STARTED`, `VALIDATED`, `LOADING`, `LOADED`, `RECONCILED`, `FAILED`, or `UNKNOWN`), the database transaction state and evidence state (recorded separately), whether the run is ready for reconciliation, source checksums, validation counts or run-level errors, expected target counts and amount, database checksum, and the failure stage, step, and reason |
 | `source\` | Exact copies of the source files that could be read, checked against the checksums taken at planning |
+| `reports\exceptions.csv` | Every rejected source row, one row per rule failure, including rows rejected only because their application unit was (`DEPENDENT` = `Y`), with file, line, source key, unit key, rule, root cause, field, exact source value, message, remediation, and the raw source line. Sample extract: 18 rows. |
+| `reports\exclusions.csv` | Deliberate exclusions (EX-01 to EX-05), with the same columns; dependent EX-05 rows point to their application's exclusion. Sample extract: 6 rows. |
+| `reports\warnings.csv` | Nonblocking warnings: customers that load without any converted application (WN-01). Sample extract: 3 rows. |
 | `reports\load_result.json` | Written once a load was attempted: counts and requested amount read back from the database (amounts as decimal strings), transaction states, and failure details |
 | `reports\reconciliation.json` | Written by reconciliation: the result of each rule RC-01 to RC-10, totals, distributions, relationships, customers without converted applications, every discrepancy with its source line, target ID, and expected and actual values, and the attempt ID the manifest must match |
 
@@ -188,6 +195,13 @@ The run folder is reserved before the source is validated, so an invalid extract
 `FAILED` manifest and its archived files, but no database. Run IDs are never reused, even after a
 failure. If a source file changes between planning and loading, the run fails with RUN-08 and
 nothing is loaded.
+
+The three record reports are written from the validated plan before anything is loaded. They are
+checked against the plan's row counts first, written atomically, and recorded in the manifest
+with their SHA-256 checksums and counts. If any of them cannot be written or verified, the run
+fails at stage `reports` with exit code 11, no database is created, and any files already written
+are kept. A run is ready for reconciliation only while its reports still match the manifest. Runs
+created before the reports existed (such as `DEMO-001`) have none and are not changed.
 
 If the load commits but its evidence cannot be completed, the run stays `LOADING`, is not ready for
 reconciliation, and the command exits with code 6. `recover_run` then inspects the database

@@ -356,6 +356,7 @@ select:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px
   border-radius: 8px;
   box-shadow: var(--shadow);
   overflow: hidden;
+  overflow: clip; /* clips like hidden without becoming a scroller, so .table-scrollbar can stick */
 }
 
 .panel-header {
@@ -423,6 +424,7 @@ select:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px
 /* Wide tables scroll inside their panel, never the page. The "local" layers cover the "scroll"
    shadows at each end, so a shadow shows only on a side with hidden columns. */
 .table-scroll {
+  position: relative; /* keeps absolutely positioned descendants, such as .visually-hidden, inside */
   overflow-x: auto;
   overscroll-behavior-x: contain;
   max-width: 100%;
@@ -434,6 +436,71 @@ select:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px
 }
 .table-scroll:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .scroll-hint { margin: 0; padding: 0.3rem 1rem; border-bottom: 1px solid var(--border); color: var(--text-faint); font-size: 0.78rem; }
+
+/* Every overflowing table gets its own always-drawn scrollbar (app.js), so nothing depends on the
+   platform's native scrollbar, which may be hidden or auto-hide. The bar is sticky inside its
+   table's frame: it sits under the last row when that is in view, and otherwise pins to the
+   bottom of the viewport, never leaving its own table's area. */
+.table-frame { min-width: 0; }
+.table-frame[data-scrollbar] > .table-scroll { scrollbar-width: none; }
+.table-frame[data-scrollbar] > .table-scroll::-webkit-scrollbar { display: none; }
+.table-scrollbar {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.3rem 0.5rem;
+  overflow: hidden;
+  background: var(--surface-2);
+  border-top: 1px solid var(--border-strong);
+}
+.table-scrollbar[hidden] { display: none; }
+.table-scrollbar-track {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: var(--surface-3);
+  cursor: pointer;
+  touch-action: none;
+}
+.table-scrollbar-thumb {
+  position: absolute;
+  top: 1px;
+  bottom: 1px;
+  left: 0;
+  min-width: 24px;
+  border-radius: 6px;
+  background: var(--text-muted);
+  cursor: grab;
+  touch-action: none;
+}
+.table-scrollbar-thumb:hover,
+.table-scrollbar-thumb[data-dragging] { background: var(--text); }
+.table-scrollbar-thumb[data-dragging] { cursor: grabbing; }
+.table-scrollbar-thumb:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.table-scrollbar-step {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 30px;
+  height: 26px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 1.15rem;
+  line-height: 1;
+  cursor: pointer;
+}
+.table-scrollbar-step:hover { background: var(--surface-3); }
+.table-scrollbar-step:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.table-scrollbar-step[aria-disabled="true"] { opacity: 0.45; cursor: default; }
 
 .table {
   width: 100%;
@@ -536,6 +603,19 @@ select:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px
   font-size: 0.85rem;
 }
 
+/* An empty or whitespace-only recorded value. Italic sans text in a dashed outline, so it never
+   reads as a value (values show as monospace code) or as missing evidence (.unknown). */
+.blank-value {
+  display: inline-block;
+  padding: 0 0.4rem;
+  border-radius: 4px;
+  border: 1px dashed var(--border-strong);
+  color: var(--text-muted);
+  font-style: italic;
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
 /* ---------- Filters & pagination ---------- */
 
 .filters {
@@ -618,9 +698,55 @@ select:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px
 .table td.wrap { white-space: normal; min-width: 14rem; overflow-wrap: anywhere; }
 .problems { margin: 0.4rem 0 0; padding-left: 1.25rem; }
 .timestamp { white-space: nowrap; }
+dd > .timestamp { white-space: normal; } /* outside tables there is no sideways scroll to reach it */
 .table th .th-note { display: block; font-size: 0.7rem; font-weight: 500; text-transform: none; letter-spacing: 0; color: var(--text-faint); white-space: normal; }
 .table td.wrap-tight { white-space: normal; min-width: 9rem; max-width: 15rem; overflow-wrap: anywhere; }
 .table td.wrap-tight .badge { white-space: normal; border-radius: 6px; }
+.report-tabs { margin-bottom: 1rem; }
+.panel-intro { margin: 0; padding: 0.6rem 1rem; color: var(--text-muted); }
+.panel > .filters { border: 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); border-radius: 0; }
+.panel > .notice { margin: 0 1rem 0.75rem; }
+.report-count { margin: 0; padding: 0.5rem 1rem; }
+.table td.nowrap { white-space: nowrap; }
+/* Report values keep their exact spacing, so padded or blank values stay visible. Identifiers
+   never break inside; long values and source lines open to the complete value, which wraps. */
+.report-table code.ident { white-space: pre; overflow-wrap: normal; }
+.report-table td.refs { white-space: normal; min-width: 12rem; }
+.report-table .ref { white-space: nowrap; }
+.raw-more summary { cursor: pointer; white-space: nowrap; }
+.raw-more summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.raw-full { display: flex; align-items: flex-start; gap: 0.5rem; width: 28rem; margin-top: 0.35rem; }
+.raw-full code { flex: 1 1 auto; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.button-copy { height: 26px; padding: 0 0.6rem; font-size: 0.8rem; }
+
+/* The source-line column has a fixed width that fits inside the scroll region at any viewport,
+   so at full scroll the whole cell, collapsed or open, is in view with room at the right edge. */
+.report-table { --source-line-width: min(26rem, 100vw - 5rem); }
+.report-table .col-source-line {
+  box-sizing: border-box;
+  width: var(--source-line-width);
+  min-width: var(--source-line-width);
+  max-width: var(--source-line-width);
+  padding-right: 1.5rem;
+}
+.report-table td.col-source-line .raw-more summary > code {
+  display: inline-block;
+  max-width: calc(var(--source-line-width) - 4.5rem);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+}
+.report-table td.col-source-line .raw-full { width: calc(var(--source-line-width) - 2.25rem); }
+.report-table td.col-key .raw-full { width: 20rem; }
+
+/* Sticky Source and Key columns, switched on by app.js only on wide screens where they leave
+   most of the region free. Opaque backgrounds keep scrolled cells from showing through. */
+.report-table[data-sticky] .col-source,
+.report-table[data-sticky] .col-key { position: sticky; z-index: 1; background: var(--surface); }
+.report-table[data-sticky] th.col-source,
+.report-table[data-sticky] th.col-key { z-index: 2; background: var(--surface-2); }
+.report-table[data-sticky] .col-source { left: 0; }
+.report-table[data-sticky] .col-key { left: var(--sticky-key-left, 0px); box-shadow: inset -1px 0 0 var(--border-strong); }
 .run-id-compact { white-space: nowrap; }
 .page-header h1 .run-id { overflow-wrap: anywhere; }
 .page-header h1 > span { min-width: 0; }

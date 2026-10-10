@@ -1,4 +1,4 @@
-"""Jinja filters. Missing values render as words, never as zero."""
+"""Jinja filters and tests. Missing values render as words, never as zero."""
 
 from __future__ import annotations
 
@@ -81,6 +81,11 @@ def term(months: int) -> str:
     return f"{months} mo"
 
 
+def blank(value: object) -> bool:
+    """Recorded text that is empty or only whitespace. None (no recorded value) is not blank."""
+    return isinstance(value, str) and not value.strip()
+
+
 FILTERS = {
     "money": money,
     "compact_money": compact_money,
@@ -91,4 +96,8 @@ FILTERS = {
     "label": label,
     "term": term,
     "utc_timestamp": utc_timestamp,
+}
+
+TESTS = {
+    "blank": blank,
 }

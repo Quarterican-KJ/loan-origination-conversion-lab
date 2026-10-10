@@ -24,6 +24,7 @@
 
 <section class="panel" aria-labelledby="parties">
   <header class="panel-header"><h2 id="parties">Parties <span class="count">{{ parties | length }}</span></h2></header>
+  <div class="table-scroll" role="region" aria-label="Parties">
   <table class="table">
     <thead><tr><th scope="col">Name</th><th scope="col">Type</th><th scope="col">Role</th><th scope="col">Borrower ID</th></tr></thead>
     <tbody>
@@ -39,6 +40,7 @@
       {% endfor %}
     </tbody>
   </table>
+  </div>
 </section>
 
 <section class="section" aria-labelledby="collateral">
@@ -91,6 +93,7 @@
     <div class="subsection">
       <h4>Liens <span class="count">{{ item.liens | length }}</span></h4>
       {% if item.liens %}
+      <div class="table-scroll" role="region" aria-label="Liens on collateral #{{ item.id }}">
       <table class="table table-compact">
         <thead><tr><th scope="col">Creditor</th><th scope="col" class="num">Recorded priority</th><th scope="col" class="num">Outstanding balance</th><th scope="col">Status</th></tr></thead>
         <tbody>
@@ -104,6 +107,7 @@
           {% endfor %}
         </tbody>
       </table>
+      </div>
       <p class="footnote">Priority is shown as recorded by the source. It is not a computed legal ranking.</p>
       {% else %}
       <p class="muted">No liens recorded.</p>

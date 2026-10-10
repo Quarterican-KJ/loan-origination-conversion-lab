@@ -69,7 +69,8 @@ it, and produces an immutable `ConversionPlan`. It never opens a database.
 | `transforms.py` | Pure, exact conversions: names, amounts, rates, terms |
 | `planner.py` | Record-level stages in spec order: structure, duplicates, exclusions, source checks, mapping, references, conversion units, warnings |
 | `loader.py` | Phase 2: RUN-07, schema creation, and the single load transaction (below) |
-| `run.py` | Run lifecycle and evidence: reserves `output/conversion/<run_id>/`, archives the source, records validation failures, verifies the source (RUN-08), calls the loader, writes `manifest.json` and `reports/load_result.json`, and recovers, formally fails, or checks the readiness of a run |
+| `run.py` | Run lifecycle and evidence: reserves `output/conversion/<run_id>/`, archives the source, records validation failures, writes the record reports, verifies the source (RUN-08), calls the loader, writes `manifest.json` and `reports/load_result.json`, and recovers, formally fails, or checks the readiness of a run |
+| `reports.py` | Builds `exceptions.csv`, `exclusions.csv`, and `warnings.csv` from a `ConversionPlan` (spec section 13.1), checks them against the plan's row accounting, and checks a manifest's `reports` record against its validation summary. Pure: it writes nothing. |
 | `cli.py` | `python -m loan_lab.conversion.legacy`: reserve a run, validate and plan the extract, then load it with evidence |
 | `reconcile.py` | Phase 3: independent reconciliation (RC-01 to RC-10) of a `LOADED` run against its archived source, writing `reports/reconciliation.json` (below) |
 | `reconcile_cli.py` | `python -m loan_lab.conversion.legacy.reconcile_cli <run_id>`: reconcile one run |
@@ -111,6 +112,7 @@ run_id)` does the same for a plan built beforehand. Both record every outcome un
 | Manifest | `manifest.json` is written at once with status `STARTED` (`VALIDATED` for `run_load`), and replaced at each later step. |
 | Archive | Each source file that exists and is a regular file is streamed into `source/`, hashing the bytes read; the copy is hashed again. A missing or unreadable file is recorded with an `error`. |
 | Validate | `run_conversion` only. A `SourceValidationError` (RUN-01 to RUN-06) makes the run `FAILED` at stage `validation`, with every issue in `validation.issues`, and raises `SourceRunFailedError`. No `data/conversion/<run_id>/` directory or database is created. |
+| Reports | Once validation passes (`run_conversion`), or as soon as the plan is recorded and before the source is archived (`run_load`), `exceptions.csv`, `exclusions.csv`, and `warnings.csv` are built from the plan, checked against its row accounting, written atomically to `reports/`, read back, and recorded in the manifest's `reports` record with their SHA-256, size, and counts (`state: complete`). Any failure makes the run `FAILED` at stage `reports` (step `write_reports`, evidence `incomplete`), keeps any files already written, and raises `ReportRunFailedError` before a database exists. |
 | Verify (RUN-08) | The archived checksums must equal `plan.source_checksums`, which the planner recorded. Otherwise the run is `FAILED` (`verify_source`, RUN-08) before any database exists, and the archive keeps the changed bytes. |
 | Loading | `LOADING`, `database_transaction: in_progress`, and the database path are written **before** `load_plan` starts. |
 | Load | `load_plan` as above. A RUN-07 refusal for the database directory or a `LoadFailedError` is recorded as `FAILED` with the step (`reserve_database`, `create_schema`, `insert_borrowers`, `insert_applications`, `insert_parties`, or `commit`), or as `UNKNOWN` if read-back does not confirm the rollback. |
@@ -120,7 +122,9 @@ run_id)` does the same for a plan built beforehand. Both record every outcome un
 The manifest records the run `status`, the `database_transaction` state, and the `evidence.state`
 separately. Every JSON file is written to a temporary file in the same directory, flushed with
 `fsync`, and moved into place with `os.replace`, so an interrupted write leaves the previous
-version. Failures raise `SourceRunFailedError` or `LoadRunFailedError` (both `RunFailedError`, with
+version. The CSV reports use the same atomic write. Manifest version 3 adds the `reports` record;
+older manifests (`DEMO-001`, earlier scenario runs) are read as they are and have no reports.
+Failures raise `SourceRunFailedError`, `ReportRunFailedError`, or `LoadRunFailedError` (all `RunFailedError`, with
 `stage`, `step`, `rule`, and `reason`) after the evidence is written. Any other exception,
 including `KeyboardInterrupt`, is settled by inspecting the database read-only (`FAILED` with
 outcome `interrupted` if no business rows exist, `UNKNOWN` if that cannot be verified) and is then
@@ -136,7 +140,7 @@ operate on the evidence only, never on the database:
 | --- | --- |
 | `recover_run(run_id)` | Settles a `STARTED`, `VALIDATED`, `LOADING`, or `UNKNOWN` run. Classifies the run's database read-only: exactly the planned counts and amount, with no `-journal`/`-wal` file, gives `LOADED` (report rewritten, marked recovered); no database or no business rows gives `FAILED` (unless the run was recorded as committed); anything else gives `UNKNOWN` with evidence `unverified`. A final run is returned unchanged. |
 | `fail_run(run_id, reason)` | Formally fails a non-final run (for example `UNKNOWN`) with step `formally_failed`. Refuses a run that is already `LOADED` or `FAILED`. |
-| `check_ready(run_id)` | Lists every reason a run is not ready for reconciliation: status, transaction, evidence state, ready flag, an existing reconciliation attempt, source verification, the load report, and the database checksum. |
+| `check_ready(run_id)` | Lists every reason a run is not ready for reconciliation: status, transaction, evidence state, ready flag, an existing reconciliation attempt, source verification, the load report, the record reports (version 3: `complete`, present, not links, matching their SHA-256, and counts agreeing with the validation summary), and the database checksum. |
 
 None of them reloads data, re-runs a run ID, or writes to a database. There is no command-line
 entry point for them yet.
@@ -169,10 +173,15 @@ print(db.execute("SELECT source_system, source_system_id, requested_amount, inte
 # 4. Inspect the evidence package.
 Get-ChildItem -Recurse -File output\conversion\manual-check-1 | Select-Object FullName
 Get-Content output\conversion\manual-check-1\reports\load_result.json
-#    Expect: manifest.json, reports\load_result.json, and the four files under source\;
+#    Expect: manifest.json, reports\load_result.json, reports\exceptions.csv,
+#            reports\exclusions.csv, reports\warnings.csv, and the four files under source\;
 #            "success": true, "loaded" 11 / 6 / 10 with "requested_amount": "2281000.00",
-#            and both transactions "committed". In manifest.json: "status": "LOADED" and
-#            "verified": true for every source file.
+#            and both transactions "committed". In manifest.json: "status": "LOADED",
+#            "verified": true for every source file, and "reports" "state": "complete".
+Get-ChildItem output\conversion\manual-check-1\reports\*.csv | ForEach-Object {
+    "{0}: {1}" -f $_.Name, @(Import-Csv $_.FullName).Count
+}
+#    Expect: exceptions.csv: 18, exclusions.csv: 6, warnings.csv: 3.
 
 # 5. The archived copies match the original files.
 Get-ChildItem sample_data\legacy | ForEach-Object {
@@ -217,15 +226,17 @@ python -m loan_lab.conversion.legacy.reconcile_cli manual-check-1; $LASTEXITCODE
 
 Exit codes: 0 loaded, 2 source validation failure (evidence only, no database), 3 RUN-07 refusal,
 4 load failure (rolled back, or unverified), 5 source changed since planning (RUN-08), 6 the load
-committed but its evidence is incomplete (recover the run). The reconciliation command exits with
+committed but its evidence is incomplete (recover the run), 11 the record reports could not be
+written or verified (run `FAILED` at stage `reports`, no database). The reconciliation command exits with
 0 reconciled, 7 discrepancies found (run `FAILED`), 8 refused (nothing written), 9 conflicting
 reconciliation evidence (preserved; run not reconciled), or 10 report written but not finalized
 (run not reconciled; run the command again to verify and finalize). Remove
 `data\conversion\manual-check-1` and `output\conversion\manual-check-1` and `manual-check-2` by
 hand when they are no longer needed.
 
-The exception, exclusion, warning, and unmapped-field reports, `run.log`, and release approval are
-not implemented. The source files are only read, never moved or modified.
+The unmapped-field report, `run.log`, and release approval are not implemented. Reconciliation
+checks the record reports' checksums and counts through `check_ready`, but does not re-derive
+their contents from the source. The source files are only read, never moved or modified.
 
 **Phase 3 (implemented): independent reconciliation.** `reconcile_run(run_id)` proves that the
 run's database holds exactly what its archived source says it should (spec section 12):
@@ -728,9 +739,12 @@ Read-only pages over the per-run evidence in `output/conversion/<run_id>/`. The 
 | `GET /conversions` | Runs: ID, recorded status, trust condition, source rows read, target rows loaded, requested volume loaded, reconciliation outcome, timestamps |
 | `GET /conversions/{run_id}` | Summary: status and evidence state, failure, source files and checksums, validation issues, row dispositions, financial totals, expected and loaded target counts, warnings (WN-01), reconciliation record, evidence file states |
 | `GET /conversions/{run_id}/reconciliation` | RC-01 to RC-10 results, notes, totals, and field-level discrepancies (expected and actual values, source line, target ID) |
+| `GET /conversions/{run_id}/reports/{kind}` | `kind` is `exceptions`, `exclusions`, or `warnings`. The report's rows with every column; filter by text (`q`, case-insensitive substring of any value, at most 100 characters), source `file`, `rule`, and `dependent` (`Y`/`N`). Invalid filter values are ignored. |
+| `GET /conversions/{run_id}/reports/{kind}/download` | The verified report as a spreadsheet-safe CSV attachment (below) |
 
 **Evidence sources.** Only `manifest.json`, `reports/load_result.json`,
-`reports/reconciliation.json`, and the archived files under `source/` are read. Paths recorded
+`reports/reconciliation.json`, `reports/exceptions.csv`, `reports/exclusions.csv`,
+`reports/warnings.csv`, and the archived files under `source/` are read. Paths recorded
 inside the evidence (such as `database_path`) are never followed, so the pages never open a
 conversion database or `loan_lab_dev.db`. The database checksum is displayed as recorded.
 
@@ -761,6 +775,11 @@ then pass these checks:
 - Its run ID, attempt, and database checksum match the manifest.
 - Its result is PASS, all ten rules pass exactly once, and it lists no discrepancies.
 
+For a version 3 manifest, a `LOADED` or `RECONCILED` run's `reports` record must also be
+`complete`, agree with the validation summary, and each report must still hash to its recorded
+SHA-256. Runs from earlier manifest versions show their reports as "Not produced: this run
+predates the reports"; they are not untrusted for that reason.
+
 Any failure is listed on the page and makes the run "Untrusted evidence". A `LOADED` run with an
 in-progress, unfinalized, or conflicting reconciliation attempt is also untrusted. So is any
 manifest with a non-null `release`.
@@ -778,7 +797,17 @@ labeled "Released".
   and for evidence files, are refused. A missing run returns `404`, and a missing root is
   never created.
 - **Size caps.** File sizes are checked before reading: manifest 2 MiB, load report 1 MiB,
-  reconciliation report 16 MiB.
+  reconciliation report 16 MiB, each record report 16 MiB.
+- **Record reports.** A report page or download is served only when the manifest's `reports`
+  record is `complete` and the file is a regular file inside the run directory, matches its
+  recorded SHA-256, has exactly the specified header, has the right number of fields on every
+  row, and has the recorded row count. Otherwise the page explains that the report is not
+  available, and the download returns `404`. The route's `kind` is matched against a fixed list,
+  never used as a path. Values are shown exactly as recorded, autoescaped. The download prefixes
+  any value starting with `=`, `+`, `-`, `@`, tab, carriage return, or line feed with `'` so a
+  spreadsheet does not run it as a formula, and is sent with `Content-Disposition: attachment`,
+  `X-Content-Type-Options: nosniff`, and `Cache-Control: no-store`. The archived report keeps the
+  exact source values.
 - **Parsing.** JSON is parsed with `Decimal` floats. `NaN` and `Infinity` are rejected, and the
   top level must be an object.
 - **Malformed values.** A malformed field shows as "Not available" instead of failing the
@@ -786,8 +815,11 @@ labeled "Released".
 - **Archive hashing.** Archived sources are re-hashed in streamed chunks, up to 64 MiB per file.
 - **Bounded scanning.** The list scans at most 1,000 directory entries and shows the 200 most
   recently modified valid runs. Invalid names, plain files, and links are counted as skipped.
-- **Display caps.** Pages show at most 500 discrepancies, 200 validation issues, and 200 list
-  items. Text values are truncated to 2,000 characters.
+- **Display caps.** Pages show at most 500 discrepancies, 500 report rows (after filtering), 200
+  validation issues, and 200 list items. Messages are truncated to 2,000 characters on screen.
+  In report tables, identifiers longer than 24 characters and every source line show a one-line
+  preview that opens, in a native disclosure, to the complete value; the download is never
+  truncated.
 - **Escaping and no actions.** All strings are autoescaped. Only `GET` routes exist, and there
   are no approval, upload, execution, editing, or promotion controls.
 
@@ -799,6 +831,9 @@ labeled "Released".
 - The conversion list does not re-hash archived sources, to keep it cheap. The summary and
   reconciliation pages do.
 - The conversion list shows at most 200 runs, with no pagination, sorting, or filtering.
+- Report pages show at most 500 matching rows, with no pagination; the download has every row.
+  Reports of a run that failed while writing them are not shown, because they are not verified;
+  the files stay in the evidence directory for investigation.
 - Offset pagination. Deep pages on very large datasets get slower, and there is no column
   sorting.
 - SQLite's `LIKE` is case-insensitive for ASCII letters only.

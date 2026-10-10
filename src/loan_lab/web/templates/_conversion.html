@@ -64,6 +64,40 @@
 <div class="table-scroll" role="region" aria-label="{{ label }}">{{ caller() }}</div>
 {%- endmacro %}
 
+{# A recorded value that is empty or only whitespace, which would otherwise show as nothing. Only
+   the display says so: the value, search, and downloads keep the exact recorded text. #}
+{% macro blank_value(value, name=none) -%}
+<span class="blank-value" data-blank{% if name %} data-field="{{ name }}"{% endif %} title="{% if value %}The recorded value is only whitespace ({{ value | length | number }} characters).{% else %}The recorded value is empty.{% endif %}">Blank value</span>
+{%- endmacro %}
+
+{# A report value on one line, exactly as recorded. A value over `limit` characters, and every
+   disclosed value, shows a preview that opens to the complete value; nothing is altered. #}
+{% macro raw_value(value, name, label, limit=24, disclose=false) -%}
+{% if value is blank -%}
+{{ blank_value(value, name) }}
+{%- elif not disclose and value | length <= limit -%}
+<code class="ident" data-field="{{ name }}">{{ value }}</code>
+{%- else -%}
+<details class="raw-more" data-field="{{ name }}"><summary><code class="ident" aria-hidden="true">{{ value[:limit] }}{% if value | length > limit %}…{% endif %}</code><span class="visually-hidden">{{ label }}, {{ value | length | number }} characters</span></summary><div class="raw-full"><code data-raw-full data-copy-label="{{ label }}">{{ value }}</code></div></details>
+{%- endif %}
+{%- endmacro %}
+
+{# Root-cause references ("RULE file:line", separated by "; ") wrap only between references. #}
+{% macro refs(value) -%}
+{% for ref in value.split("; ") %}<span class="ref">{{ ref }}</span>{% if not loop.last %}; {% endif %}{% endfor %}
+{%- endmacro %}
+
+{# Report state for runs that record one; older runs predate the reports. #}
+{% macro report_state(reports) -%}
+{% if reports is none or reports.state is none %}{{ na() }}
+{%- elif reports.state == "not_produced" %}<span class="muted" data-report-state="not_produced">Not produced: this run predates the reports</span>
+{%- elif reports.available %}<span class="badge result-pass" data-report-state="complete">Complete</span>
+{%- elif reports.state == "complete" %}<span class="badge result-fail" data-report-state="unverified">Recorded complete, but does not verify</span>
+{%- elif reports.state == "failed" %}<span class="badge result-fail" data-report-state="failed">Failed</span>
+{%- elif reports.state == "in_progress" %}<span class="badge result-unverified" data-report-state="in_progress">Incomplete</span>
+{%- else %}<span class="muted" data-report-state="not_started">Not produced: no conversion plan</span>{% endif %}
+{%- endmacro %}
+
 {% macro label_or_na(value) -%}
 {% if value is none %}{{ na() }}{% else %}{{ value | label }}{% endif %}
 {%- endmacro %}
@@ -96,6 +130,7 @@
   <nav class="tabs" aria-label="Run views">
     <a class="button {% if current != 'summary' %}button-ghost{% endif %}" href="{{ url_for('conversion', run_id=run.run_id) }}" {% if current == 'summary' %}aria-current="page"{% endif %}>Summary</a>
     <a class="button {% if current != 'reconciliation' %}button-ghost{% endif %}" href="{{ url_for('conversion_reconciliation', run_id=run.run_id) }}" {% if current == 'reconciliation' %}aria-current="page"{% endif %}>Reconciliation</a>
+    <a class="button {% if current != 'reports' %}button-ghost{% endif %}" href="{{ url_for('conversion_report', run_id=run.run_id, kind='exceptions') }}" {% if current == 'reports' %}aria-current="page"{% endif %}>Reports</a>
     <a class="button button-ghost" href="{{ url_for('conversions') }}">All runs</a>
   </nav>
 </div>

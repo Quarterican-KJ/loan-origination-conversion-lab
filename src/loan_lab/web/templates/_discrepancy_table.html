@@ -13,8 +13,8 @@
         <td>{% if d.source_key is none %}<span class="muted">—</span>{% else %}<code>{{ d.source_key }}</code>{% endif %}</td>
         <td>{% if d.target_table is none %}<span class="muted">—</span>{% else %}<code>{{ d.target_table }}{% if d.target_id %} #{{ d.target_id }}{% endif %}</code>{% endif %}</td>
         <td>{% if d.field is none %}<span class="muted">—</span>{% else %}<code>{{ d.field }}</code>{% endif %}</td>
-        <td class="wrap-tight" data-field="expected">{% if d.expected is none %}<span class="muted">—</span>{% else %}{{ d.expected }}{% endif %}</td>
-        <td class="wrap-tight" data-field="actual">{% if d.actual is none %}<span class="muted">—</span>{% else %}{{ d.actual }}{% endif %}</td>
+        <td class="wrap-tight" data-field="expected">{% if d.expected is none %}<span class="muted">—</span>{% elif d.expected is blank %}{{ c.blank_value(d.expected) }}{% else %}{{ d.expected }}{% endif %}</td>
+        <td class="wrap-tight" data-field="actual">{% if d.actual is none %}<span class="muted">—</span>{% elif d.actual is blank %}{{ c.blank_value(d.actual) }}{% else %}{{ d.actual }}{% endif %}</td>
         <td class="wrap">{{ c.text(d.message) }}</td>
       </tr>
       {% endfor %}

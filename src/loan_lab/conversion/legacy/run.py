@@ -1,8 +1,10 @@
 """Durable per-run evidence around validation and the Phase 2 load (spec sections 2.2, 11 and 13).
 
 Every run reserves a new ``output/conversion/<run_id>/`` directory before anything else, archives
-the source files, and records its lifecycle in ``manifest.json`` (plus ``reports/load_result.json``
-once a load was attempted). The run's status, the state of the database transaction, and the
+the source files, and records its lifecycle in ``manifest.json``. Once a plan exists, the
+exception, exclusion, and warning reports are written to ``reports/`` before any load, with their
+checksums in the manifest; ``reports/load_result.json`` follows once a load was attempted. The
+run's status, the state of the database transaction, and the
 state of the evidence itself are recorded separately, so a reporting failure can never make a
 committed load look as if it never happened:
 
@@ -49,11 +51,21 @@ from loan_lab.conversion.legacy.loader import (
 )
 from loan_lab.conversion.legacy.plan import ConversionPlan, Disposition, Outcome
 from loan_lab.conversion.legacy.planner import plan_conversion
+from loan_lab.conversion.legacy.reports import (
+    COLUMNS,
+    REPORT_KINDS,
+    ReportState,
+    build_reports,
+    summary_problems,
+)
 from loan_lab.conversion.legacy.source import RunIssue, SourceValidationError
 from loan_lab.models import ApplicationParty, Borrower, LoanApplication
 from loan_lab.paths import default_conversion_root, default_evidence_root
 
-MANIFEST_VERSION = 2
+MANIFEST_VERSION = 3
+# Runs recorded with an earlier manifest version predate the exception, exclusion, and warning
+# reports; their evidence is complete without them.
+REPORTS_MANIFEST_VERSION = 3
 REPORT_VERSION = 2
 SPECIFICATION = "docs/conversion-specification.md (v1 draft)"
 MANIFEST_NAME = "manifest.json"
@@ -184,6 +196,13 @@ class LoadRunFailedError(RunFailedError):
         super().__init__(run_id, evidence_directory, "load", step, rule, reason, status)
 
 
+class ReportRunFailedError(RunFailedError):
+    """The exception, exclusion, or warning reports could not be written; nothing was loaded."""
+
+    def __init__(self, run_id: str, evidence_directory: Path, reason: str) -> None:
+        super().__init__(run_id, evidence_directory, "reports", "write_reports", None, reason)
+
+
 class EvidenceIncompleteError(Exception):
     """The load committed, but its evidence could not be completed.
 
@@ -302,10 +321,11 @@ def run_conversion(
     evidence_root: Path | None = None,
     batch_size: int = DEFAULT_LOAD_BATCH_SIZE,
 ) -> LoadRun:
-    """Reserve the run, archive the source, validate and plan it, then load it.
+    """Reserve the run, archive the source, validate and plan it, write its reports, then load it.
 
     A source validation failure raises :class:`SourceRunFailedError` after recording the
-    run-level errors; no target database is created for an invalid extract.
+    run-level errors; no target database is created for an invalid extract. A failure to write
+    the reports raises :class:`ReportRunFailedError` before any database is created.
     """
     _check_arguments(run_id, batch_size)
     evidence = _Evidence.reserve(_root(evidence_root, default_evidence_root), run_id,
@@ -329,6 +349,7 @@ def run_conversion(
     except BaseException as error:
         evidence.fail_unexpected("validation", step, error)
         raise
+    _write_reports(evidence, plan)
     return _verify_and_load(evidence, plan, sources, conversion_root, batch_size)
 
 
@@ -345,7 +366,8 @@ def run_load(
 
     The source must still match the plan byte for byte (RUN-08). Raises
     :class:`TargetPreconditionError` without writing anything if the evidence directory already
-    exists, :class:`LoadRunFailedError` after recording a failure, and
+    exists, :class:`ReportRunFailedError` if the reports cannot be written (nothing is loaded),
+    :class:`LoadRunFailedError` after recording a failure, and
     :class:`EvidenceIncompleteError` if the load committed but its evidence could not be written.
     """
     _check_arguments(run_id, batch_size)
@@ -353,6 +375,7 @@ def run_load(
                                  source_directory)
     evidence.validated(plan)
     evidence.save_manifest()
+    _write_reports(evidence, plan)
     try:
         sources = _archive_sources(source_directory, evidence.directory / SOURCE_DIRECTORY)
     except BaseException as error:
@@ -473,7 +496,46 @@ def load_evidence_problems(
         problems.append("The conversion database is missing.")
     elif recorded_sha is None or _sha256(Path(database_path)) != recorded_sha:
         problems.append("The conversion database no longer matches its recorded checksum.")
+    problems.extend(report_evidence_problems(directory, manifest))
     return tuple(problems)
+
+
+def report_evidence_problems(directory: Path, manifest: Mapping[str, Any]) -> list[str]:
+    """Problems with the exception, exclusion, and warning reports of a run that requires them."""
+    version = manifest.get("manifest_version")
+    if type(version) is not int or version < REPORTS_MANIFEST_VERSION:
+        return []
+    record = manifest.get("reports")
+    problems = summary_problems(record, manifest.get("validation"))
+    if record is None or not isinstance(record.get("files"), Mapping):
+        return problems
+    for kind in REPORT_KINDS:
+        entry = record["files"].get(kind)
+        path = directory / REPORTS_DIRECTORY / kind.file_name
+        if not isinstance(entry, Mapping):
+            continue
+        if not path.is_file() or path.is_symlink():
+            problems.append(f"{REPORTS_DIRECTORY}/{kind.file_name} is missing.")
+        elif _sha256(path) != entry.get("sha256"):
+            problems.append(
+                f"{REPORTS_DIRECTORY}/{kind.file_name} does not match its recorded checksum."
+            )
+    return problems
+
+
+# --- Reports -------------------------------------------------------------------------------
+
+
+def _write_reports(evidence: "_Evidence", plan: ConversionPlan) -> None:
+    """Write the reports before any load. A failure fails the run; nothing is loaded."""
+    try:
+        evidence.write_reports(plan)
+    except BaseException as error:
+        reason = f"{type(error).__name__}: {error}"
+        evidence.reports_failed(reason)
+        if not isinstance(error, Exception):
+            raise
+        raise ReportRunFailedError(evidence.run_id, evidence.directory, reason) from error
 
 
 # --- Load with evidence --------------------------------------------------------------------
@@ -764,6 +826,7 @@ class _Evidence:
             "database_path": None,
             "database": None,
             "load": {"outcome": LoadOutcome.NOT_STARTED, "report": None},
+            "reports": {"state": ReportState.NOT_STARTED, "files": {}, "error": None},
             "reconciliation": None,
             "release": None,
         })
@@ -786,6 +849,39 @@ class _Evidence:
         for name in SOURCE_FILES:
             entry = self.manifest["source"]["files"].setdefault(name, {})
             entry["planned_sha256"] = plan.source_checksums[name]
+        self.manifest["reports"] = {"state": ReportState.IN_PROGRESS, "files": {}, "error": None}
+
+    def write_reports(self, plan: ConversionPlan) -> None:
+        """Write each report atomically, verify it on disk, then record the set as complete."""
+        record = self.manifest["reports"]
+        reports = build_reports(plan)
+        directory = self.directory / REPORTS_DIRECTORY
+        directory.mkdir(exist_ok=True)
+        for report in reports:
+            relative = f"{REPORTS_DIRECTORY}/{report.kind.file_name}"
+            write_bytes_atomic(directory / report.kind.file_name, report.data)
+            expected = hashlib.sha256(report.data).hexdigest()
+            if _sha256(directory / report.kind.file_name) != expected:
+                raise OSError(f"{relative} does not read back as written.")
+            record["files"][report.kind] = {
+                "path": relative, "sha256": expected, "bytes": len(report.data),
+                **report.summary(),
+            }
+        record.update(state=ReportState.COMPLETE, columns=list(COLUMNS))
+        self.save_manifest()
+
+    def reports_failed(self, reason: str) -> None:
+        """Fail the run before any load; reports already written stay as evidence. Best effort."""
+        try:
+            self.manifest["reports"].update(state=ReportState.FAILED, error=reason)
+            self._final_manifest(
+                RunStatus.FAILED,
+                {"stage": "reports", "step": "write_reports", "rule": None, "reason": reason},
+                evidence=EvidenceState.INCOMPLETE, evidence_error=reason,
+            )
+        except Exception:  # noqa: BLE001, S110
+            # The manifest still says VALIDATED with reports in progress, which is not complete.
+            pass
 
     def record_sources(self, sources: tuple[ArchivedSource, ...]) -> None:
         planned = all(s.planned_sha256 is not None for s in sources)
@@ -1152,6 +1248,12 @@ class _Evidence:
         evidence_error: str | None = None,
         recovered: bool = False,
     ) -> None:
+        reports = (self.manifest.get("reports") or {}).get("state")
+        if evidence is EvidenceState.COMPLETE and reports in (
+            ReportState.IN_PROGRESS, ReportState.FAILED
+        ):
+            evidence = EvidenceState.INCOMPLETE
+            evidence_error = "The exception, exclusion, and warning reports are not complete."
         now = _utc_now()
         self.manifest.update(
             status=status,
@@ -1176,7 +1278,11 @@ class _Evidence:
 
 def write_json_atomic(path: Path, data: Mapping[str, Any]) -> None:
     """Write to a new temporary file in the same directory, flush to disk, then replace."""
-    payload = (json.dumps(data, indent=2, default=str) + "\n").encode("utf-8")
+    write_bytes_atomic(path, (json.dumps(data, indent=2, default=str) + "\n").encode("utf-8"))
+
+
+def write_bytes_atomic(path: Path, payload: bytes) -> None:
+    """Write to a new temporary file in the same directory, flush to disk, then replace."""
     temporary = path.with_name(f".{path.name}.{secrets.token_hex(4)}.tmp")
     try:
         with temporary.open("xb") as writer:

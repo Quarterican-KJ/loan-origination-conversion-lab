@@ -1,7 +1,8 @@
 """Read-only conversion run evidence for the web interface (spec sections 2.2, 12.2, and 13).
 
 Only files inside the configured evidence root are opened: each run's ``manifest.json``,
-``reports/load_result.json``, ``reports/reconciliation.json``, and the archived source files.
+``reports/load_result.json``, ``reports/reconciliation.json``, the exception, exclusion, and
+warning reports (``reports/*.csv``), and the archived source files.
 Paths recorded inside the evidence, such as the conversion database path, are never followed, so
 the conversion databases and the development database are never opened. Nothing is written.
 
@@ -13,7 +14,9 @@ presented as reconciled only when its manifest, load report, and reconciliation 
 
 from __future__ import annotations
 
+import csv
 import hashlib
+import io
 import json
 import os
 import re
@@ -31,10 +34,19 @@ from loan_lab.conversion.legacy.reconcile import (
     RULE_TITLES,
     ReconciliationRule,
 )
+from loan_lab.conversion.legacy.reports import (
+    COLUMNS as REPORT_COLUMNS,
+    REPORT_KINDS,
+    ReportKind,
+    ReportState,
+    spreadsheet_safe,
+    summary_problems,
+)
 from loan_lab.conversion.legacy.run import (
     LOAD_REPORT_NAME,
     MANIFEST_NAME,
     REPORTS_DIRECTORY,
+    REPORTS_MANIFEST_VERSION,
     SOURCE_DIRECTORY,
     SOURCE_FILES,
 )
@@ -51,6 +63,9 @@ MAX_DISCREPANCIES_SHOWN = 500
 MAX_ISSUES_SHOWN = 200
 MAX_LIST_ITEMS_SHOWN = 200
 MAX_TEXT_LENGTH = 2000
+MAX_REPORT_BYTES = 16 * 1024 * 1024
+MAX_REPORT_ROWS_SHOWN = 500
+MAX_REPORT_QUERY_LENGTH = 100
 
 MANIFEST_FILE = MANIFEST_NAME
 LOAD_REPORT_FILE = f"{REPORTS_DIRECTORY}/{LOAD_REPORT_NAME}"
@@ -363,6 +378,54 @@ class Reconciliation:
     outcome: str
 
 
+REPORT_TITLES = {
+    ReportKind.EXCEPTIONS: "Exceptions",
+    ReportKind.EXCLUSIONS: "Exclusions",
+    ReportKind.WARNINGS: "Warnings",
+}
+REPORT_DESCRIPTIONS = {
+    ReportKind.EXCEPTIONS: "Rejected source rows, one row per rule failure, including rows "
+                           "rejected only because their conversion unit was rejected.",
+    ReportKind.EXCLUSIONS: "Rows deliberately left out of the conversion scope. Not errors.",
+    ReportKind.WARNINGS: "Nonblocking warnings. The rows still load.",
+}
+
+
+@dataclass(frozen=True)
+class ReportFile:
+    kind: ReportKind
+    path: str
+    recorded: bool
+    rows: int | None
+    sha256: str | None
+    # "matches", "differs", or a FileState value; None when not checked.
+    check: str | None
+
+    @property
+    def title(self) -> str:
+        return REPORT_TITLES[self.kind]
+
+
+@dataclass(frozen=True)
+class Reports:
+    """The run's exception, exclusion, and warning reports, as recorded and as found."""
+
+    # A ReportState value, "not_produced" for runs that predate reports, or None if unreadable.
+    state: str | None
+    error: str | None
+    files: tuple[ReportFile, ...]
+    problems: tuple[str, ...]
+
+    @property
+    def available(self) -> bool:
+        """Complete, consistent with the manifest, and (when checked) matching on disk."""
+        return (
+            self.state == ReportState.COMPLETE
+            and not self.problems
+            and all(f.check in (None, "matches") for f in self.files)
+        )
+
+
 @dataclass(frozen=True)
 class RunView:
     run_id: str
@@ -402,6 +465,7 @@ class RunView:
     loaded_target: TargetCounts | None = None
     reconciliation: Reconciliation | None = None
     release_recorded: bool = False
+    reports: Reports | None = None
 
     @property
     def condition_label(self) -> str:
@@ -552,11 +616,18 @@ def assess_run(run_id: str, run_dir: Path, *, check_archive: bool) -> RunView:
         loaded_target = _target_counts(load_file.data.get("loaded"))
     reconciliation = _reconciliation(run_id, manifest, report_file, database_sha)
 
+    reports = _reports(run_dir, manifest, check_archive)
     if status in ("LOADED", "RECONCILED"):
         problems.extend(_load_problems(
             run_id, manifest, load_file, transaction, evidence_state, database_sha,
             expected_target, loaded_target, source_files,
         ))
+        if reports.state != "not_produced":
+            problems.extend(reports.problems)
+            problems.extend(
+                f"{f.path} does not match its recorded checksum ({f.check})."
+                for f in reports.files if f.check not in (None, "matches")
+            )
     elif status in _IN_PROGRESS_STATUSES and evidence_state in ("incomplete", "unverified"):
         problems.append(f"The evidence is not complete (state: {evidence_state}).")
     if status == "LOADED":
@@ -625,7 +696,35 @@ def assess_run(run_id: str, run_dir: Path, *, check_archive: bool) -> RunView:
         loaded_target=loaded_target,
         reconciliation=reconciliation,
         release_recorded=release_recorded,
+        reports=reports,
     )
+
+
+def _reports(run_dir: Path, manifest: Mapping[str, Any], check: bool) -> Reports:
+    version = manifest.get("manifest_version")
+    if type(version) is int and version < REPORTS_MANIFEST_VERSION:
+        return Reports("not_produced", None, (), ())
+    record = manifest.get("reports")
+    state = _text(_dig(record, "state"))
+    if state not in tuple(ReportState):
+        state = None
+    files = []
+    for kind in REPORT_KINDS:
+        entry = _dig(record, "files", kind)
+        relative = f"{REPORTS_DIRECTORY}/{kind.file_name}"
+        sha = _sha(_dig(entry, "sha256"))
+        result = None
+        if check and sha is not None:
+            file_state, current = _hash_evidence_file(run_dir, relative)
+            if file_state is FileState.OK:
+                result = "matches" if current == sha else "differs"
+            else:
+                result = str(file_state)
+        files.append(ReportFile(
+            kind, relative, isinstance(entry, Mapping), _count(_dig(entry, "rows")), sha, result,
+        ))
+    problems = summary_problems(record, manifest.get("validation"))
+    return Reports(state, _text(_dig(record, "error")), tuple(files), tuple(problems))
 
 
 def _condition(status: str | None, evidence_state: str | None, problems: list[str]) -> Condition:
@@ -936,3 +1035,197 @@ def _discrepancy(value: Any) -> DiscrepancyView:
         actual=text("actual"),
         message=text("message"),
     )
+
+
+# --- Exception, exclusion, and warning reports ----------------------------------------------------
+
+
+def report_kind(value: str) -> ReportKind | None:
+    try:
+        return ReportKind(value)
+    except ValueError:
+        return None
+
+
+@dataclass(frozen=True)
+class ReportFilters:
+    q: str = ""
+    file: str = ""
+    rule: str = ""
+    dependent: str = ""
+
+    @property
+    def active(self) -> bool:
+        return bool(self.q or self.file or self.rule or self.dependent)
+
+
+def report_filters(q: str = "", file: str = "", rule: str = "", dependent: str = "") -> ReportFilters:
+    """Filters from the query string. Values outside the allowed sets are ignored."""
+    return ReportFilters(
+        q=q.strip()[:MAX_REPORT_QUERY_LENGTH],
+        file=file if file in DATA_FILES else "",
+        rule=rule if re.fullmatch(r"[A-Z]{2,3}-[0-9]{2}", rule) else "",
+        dependent=dependent if dependent in ("Y", "N") else "",
+    )
+
+
+@dataclass(frozen=True)
+class ReportRow:
+    file: str
+    line: str
+    source_key: str
+    unit_key: str
+    stage: str
+    rule: str
+    dependent: str
+    root_cause: str
+    field: str
+    source_value: str
+    message: str
+    remediation: str
+    source_line: str
+
+
+@dataclass(frozen=True)
+class ReportView:
+    run: RunView
+    kind: ReportKind
+    file: ReportFile
+    # Why the report cannot be shown; empty when it was read and verified.
+    problems: tuple[str, ...]
+    total: int | None
+    rows: tuple[ReportRow, ...]
+    matched: int
+    filters: ReportFilters
+    rules: tuple[str, ...]
+
+    @property
+    def title(self) -> str:
+        return REPORT_TITLES[self.kind]
+
+    @property
+    def description(self) -> str:
+        return REPORT_DESCRIPTIONS[self.kind]
+
+    @property
+    def available(self) -> bool:
+        return not self.problems
+
+    @property
+    def truncated(self) -> bool:
+        return self.matched > len(self.rows)
+
+
+def load_report(
+    root: Path | None, run_id: str, kind: ReportKind, filters: ReportFilters
+) -> ReportView | None:
+    """The report's rows matching ``filters``, at most MAX_REPORT_ROWS_SHOWN of them."""
+    run = load_run(root, run_id)
+    if run is None:
+        return None
+    file = _report_file(run, kind)
+    rows, problems = _read_report(root, run, file)
+    matched = [row for row in rows if _matches(row, filters)]
+    return ReportView(
+        run=run,
+        kind=kind,
+        file=file,
+        problems=tuple(problems),
+        total=len(rows) if not problems else None,
+        rows=tuple(matched[:MAX_REPORT_ROWS_SHOWN]),
+        matched=len(matched),
+        filters=filters,
+        rules=tuple(sorted({row.rule for row in rows})),
+    )
+
+
+def report_download(root: Path | None, run_id: str, kind: ReportKind) -> bytes | None:
+    """A spreadsheet-safe copy of a verified report, or None if it cannot be shown.
+
+    Values that a spreadsheet could run as formulas are prefixed with ``'``. The archived report
+    in the evidence directory is never changed and keeps the exact source values.
+    """
+    run = load_run(root, run_id)
+    if run is None:
+        return None
+    rows, problems = _read_report(root, run, _report_file(run, kind))
+    if problems:
+        return None
+    buffer = io.StringIO(newline="")
+    writer = csv.writer(buffer, lineterminator="\r\n")
+    writer.writerow(REPORT_COLUMNS)
+    for row in rows:
+        writer.writerow(spreadsheet_safe(value) for value in _values(row))
+    # A byte order mark, so spreadsheet programs read the file as UTF-8.
+    return "\ufeff".encode() + buffer.getvalue().encode("utf-8")
+
+
+def _report_file(run: RunView, kind: ReportKind) -> ReportFile:
+    recorded = [f for f in run.reports.files if f.kind is kind] if run.reports else []
+    if recorded:
+        return recorded[0]
+    return ReportFile(kind, f"{REPORTS_DIRECTORY}/{kind.file_name}", False, None, None, None)
+
+
+def _read_report(
+    root: Path | None, run: RunView, file: ReportFile
+) -> tuple[list[ReportRow], list[str]]:
+    reports = run.reports
+    if reports is None:
+        return [], [f"{MANIFEST_FILE}: {run.manifest.label}."]
+    if reports.state == "not_produced":
+        return [], ["This run predates the exception, exclusion, and warning reports."]
+    if reports.state != ReportState.COMPLETE:
+        return [], [f"The reports are not complete (state: {reports.state or 'not recorded'})."]
+    if reports.problems:
+        return [], list(reports.problems)
+    if file.sha256 is None or file.rows is None:
+        return [], [f"The manifest does not record {file.path}."]
+    run_dir = run_directory(root, run.run_id)
+    if run_dir is None:
+        return [], ["The run directory is not available."]
+    path, state = _evidence_path(run_dir, file.path)
+    if path is None:
+        return [], [f"{file.path}: {FILE_STATE_LABELS[state or FileState.MISSING]}."]
+    try:
+        with path.open("rb") as handle:
+            raw = handle.read(MAX_REPORT_BYTES + 1)
+    except OSError as error:
+        return [], [f"{file.path}: {FILE_STATE_LABELS[FileState.UNREADABLE]} ({type(error).__name__})."]
+    if len(raw) > MAX_REPORT_BYTES:
+        return [], [f"{file.path} is larger than {MAX_REPORT_BYTES:,} bytes."]
+    if hashlib.sha256(raw).hexdigest() != file.sha256:
+        return [], [f"{file.path} does not match the checksum recorded in the manifest."]
+    try:
+        records = list(csv.reader(io.StringIO(raw.decode("utf-8"), newline=""), strict=True))
+    except (UnicodeDecodeError, csv.Error):
+        return [], [f"{file.path} is not valid UTF-8 CSV."]
+    if not records or tuple(records[0]) != REPORT_COLUMNS:
+        return [], [f"{file.path} does not have the expected columns."]
+    body = records[1:]
+    if any(len(record) != len(REPORT_COLUMNS) for record in body):
+        return [], [f"{file.path} has a row with the wrong number of fields."]
+    if len(body) != file.rows:
+        return [], [f"{file.path} holds {len(body):,} rows; the manifest records {file.rows:,}."]
+    return [ReportRow(*record) for record in body], []
+
+
+def _values(row: ReportRow) -> tuple[str, ...]:
+    return (
+        row.file, row.line, row.source_key, row.unit_key, row.stage, row.rule, row.dependent,
+        row.root_cause, row.field, row.source_value, row.message, row.remediation,
+        row.source_line,
+    )
+
+
+def _matches(row: ReportRow, filters: ReportFilters) -> bool:
+    if filters.file and row.file != filters.file:
+        return False
+    if filters.rule and row.rule != filters.rule:
+        return False
+    if filters.dependent and row.dependent != filters.dependent:
+        return False
+    if filters.q:
+        needle = filters.q.casefold()
+        return any(needle in value.casefold() for value in _values(row))
+    return True

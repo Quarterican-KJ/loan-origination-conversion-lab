@@ -21,6 +21,16 @@ from loan_lab.web.templating import STATIC_DIR, templates
 SEED_COMMAND = "python -m loan_lab.synthetic --preset demo"
 
 
+class RevalidatedStaticFiles(StaticFiles):
+    """Static files that browsers revalidate on every use (a cheap 304). Without a Cache-Control
+    header, browsers may reuse a heuristically cached, outdated copy without asking."""
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 def install_web(
     app: FastAPI, database_path: Path | None = None, evidence_root: Path | None = None
 ) -> None:
@@ -41,7 +51,7 @@ def install_web(
 
     app.include_router(router)
     app.include_router(conversion_router)
-    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+    app.mount("/static", RevalidatedStaticFiles(directory=STATIC_DIR), name="static")
     app.add_exception_handler(InvalidQuery, _invalid_query)
     app.add_exception_handler(InvalidRunId, _invalid_run_id)
     app.add_exception_handler(RequestValidationError, _invalid_request)

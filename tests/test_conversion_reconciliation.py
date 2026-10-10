@@ -738,7 +738,9 @@ def test_report_write_failure_restores_the_manifest(
 
     # The attempt marker was undone byte for byte; no report and no temporary file remain.
     assert ws.snapshot() == before
-    assert os.listdir(ws.evidence() / "reports") == ["load_result.json"]
+    assert sorted(os.listdir(ws.evidence() / "reports")) == [
+        "exceptions.csv", "exclusions.csv", "load_result.json", "warnings.csv",
+    ]
     assert check_ready("run-1", evidence_root=ws.evidence_root).ready
     assert ws.reconcile().passed
 
@@ -1060,7 +1062,10 @@ def test_report_is_written_atomically_as_exact_json(ws: Workspace) -> None:
     ws.reconcile()
 
     files = sorted(p.name for p in (ws.evidence() / "reports").iterdir())
-    assert files == ["load_result.json", "reconciliation.json"]
+    assert files == [
+        "exceptions.csv", "exclusions.csv", "load_result.json", "reconciliation.json",
+        "warnings.csv",
+    ]
     text = ws.report_path().read_text("utf-8")
     report = json.loads(text, parse_float=lambda s: pytest.fail(f"float {s} in report"))
     assert report["run_id"] == "run-1"
