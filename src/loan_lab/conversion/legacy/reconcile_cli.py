@@ -63,8 +63,12 @@ def main(argv: list[str] | None = None) -> int:
     stream = sys.stdout if result.passed else sys.stderr
     print(f"Run {result.run_id} {result.status}. Report: {result.report_path}", file=stream)
     for rule in result.rules:
-        verdict = "PASS" if rule.passed else f"FAIL ({rule.discrepancies})"
-        print(f"  {rule.rule} {rule.title:<44}{verdict}", file=stream)
+        verdict = "PASS" if rule.passed else (
+            f"FAIL ({rule.discrepancies})" if rule.discrepancies else "INCOMPLETE"
+        )
+        if not rule.complete:
+            verdict += f", {(rule.not_evaluated or {}).get('lines')} lines not compared"
+        print(f"  {rule.rule} {rule.title:<48}{verdict}", file=stream)
     for discrepancy in result.discrepancies[:20]:
         where = f"{discrepancy.file}:{discrepancy.line}" if discrepancy.line else (
             discrepancy.file or discrepancy.target_table or ""

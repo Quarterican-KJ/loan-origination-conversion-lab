@@ -2,7 +2,7 @@
 <div class="table-scroll" role="region" aria-label="Discrepancies">
   <table class="table table-compact">
     <thead>
-      <tr><th scope="col">Rule</th><th scope="col">Check</th><th scope="col">Source</th><th scope="col">Source key</th><th scope="col">Target</th><th scope="col">Field</th><th scope="col">Expected</th><th scope="col">Actual</th><th scope="col">Explanation</th></tr>
+      <tr><th scope="col">Rule</th><th scope="col">Check</th><th scope="col">Source</th><th scope="col">Source key</th><th scope="col">Evidence</th><th scope="col">Target</th><th scope="col">Field</th><th scope="col">Expected</th><th scope="col">Actual</th><th scope="col">Explanation</th></tr>
     </thead>
     <tbody>
       {% for d in items %}
@@ -10,7 +10,8 @@
         <td>{{ c.text(d.rule) }}</td>
         <td><code>{{ c.text(d.check) }}</code></td>
         <td>{% if d.file is none %}<span class="muted">—</span>{% else %}<code>{{ d.file }}{% if d.line %}:{{ d.line }}{% endif %}</code>{% endif %}</td>
-        <td>{% if d.source_key is none %}<span class="muted">—</span>{% else %}<code>{{ d.source_key }}</code>{% endif %}</td>
+        <td>{% if d.source_key is none %}<span class="muted">—</span>{% else %}<code>{{ d.source_key }}</code>{% endif %}{% if d.unit_key %}<br><span class="muted">unit</span> <code>{{ d.unit_key }}</code>{% endif %}</td>
+        <td data-field="evidence">{% if d.evidence is none %}<span class="muted">—</span>{% else %}<code>{{ d.evidence }}</code>{% endif %}</td>
         <td>{% if d.target_table is none %}<span class="muted">—</span>{% else %}<code>{{ d.target_table }}{% if d.target_id %} #{{ d.target_id }}{% endif %}</code>{% endif %}</td>
         <td>{% if d.field is none %}<span class="muted">—</span>{% else %}<code>{{ d.field }}</code>{% endif %}</td>
         <td class="wrap-tight" data-field="expected">{% if d.expected is none %}<span class="muted">—</span>{% elif d.expected is blank %}{{ c.blank_value(d.expected) }}{% else %}{{ d.expected }}{% endif %}</td>

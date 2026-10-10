@@ -82,7 +82,7 @@ Then open:
 | Application detail: terms, parties, collateral, appraisals, liens | <http://127.0.0.1:8000/applications/1> |
 | Conversion runs found in `output\conversion` | <http://127.0.0.1:8000/conversions> |
 | Conversion run summary: status, source checksums, row dispositions, totals, warnings | <http://127.0.0.1:8000/conversions/manual-check-1> |
-| Reconciliation: RC-01 to RC-10 and field-level discrepancies | <http://127.0.0.1:8000/conversions/manual-check-1/reconciliation> |
+| Reconciliation: RC-01 to RC-12 (RC-01 to RC-10 for runs reconciled before Milestone 10) and field-level discrepancies | <http://127.0.0.1:8000/conversions/manual-check-1/reconciliation> |
 | Exception, exclusion, and warning reports: search, file/rule/dependent filters, CSV download | <http://127.0.0.1:8000/conversions/manual-check-1/reports/exceptions> |
 | Health check → `{"status":"ok"}` | <http://127.0.0.1:8000/health> |
 | Interactive API docs | <http://127.0.0.1:8000/docs> |
@@ -189,7 +189,7 @@ Each run keeps its evidence in `output\conversion\<run_id>\` (git-ignored):
 | `reports\exclusions.csv` | Deliberate exclusions (EX-01 to EX-05), with the same columns; dependent EX-05 rows point to their application's exclusion. Sample extract: 6 rows. |
 | `reports\warnings.csv` | Nonblocking warnings: customers that load without any converted application (WN-01). Sample extract: 3 rows. |
 | `reports\load_result.json` | Written once a load was attempted: counts and requested amount read back from the database (amounts as decimal strings), transaction states, and failure details |
-| `reports\reconciliation.json` | Written by reconciliation: the result of each rule RC-01 to RC-10, totals, distributions, relationships, customers without converted applications, every discrepancy with its source line, target ID, and expected and actual values, and the attempt ID the manifest must match |
+| `reports\reconciliation.json` | Written by reconciliation (`report_version` 2): the result of each rule RC-01 to RC-12, the independently determined eligibility counts, totals, distributions, relationships, customers without converted applications, every discrepancy with its source line, target ID, and expected and actual values, and the attempt ID the manifest must match |
 
 The run folder is reserved before the source is validated, so an invalid extract still leaves a
 `FAILED` manifest and its archived files, but no database. Run IDs are never reused, even after a
@@ -215,11 +215,15 @@ Then reconcile the loaded run against its archived source:
 python -m loan_lab.conversion.legacy.reconcile_cli manual-check-1
 ```
 
-Reconciliation re-reads the archived files, recomputes every expected value independently (never
-reusing the converter's mapped values), and compares every loaded record and relationship with the
-database, which it opens read-only. If every rule passes, the run becomes `RECONCILED` and awaits a
-release decision; otherwise it becomes `FAILED` and cannot be released. It refuses a run that is
-not ready, or whose archived files or database no longer match their recorded checksums. It never
+Reconciliation re-reads the archived files, decides each source line's eligibility and recomputes
+every expected value independently (never running the converter's planner or reusing its mapped
+values), and compares every loaded record and relationship with the database, which it opens
+read-only. It also compares each line's disposition and target membership (RC-11) and the rows of
+the exception, exclusion, and warning reports (RC-12) with that independent answer. If every rule
+passes, the run becomes `RECONCILED` and awaits a release decision; otherwise it becomes `FAILED`
+and cannot be released. It refuses a run that is not ready, whose archived files or database no
+longer match their recorded checksums, or that is `LOADED` but predates the record reports. Runs
+reconciled before Milestone 10 (report version 1) keep their reconciliation unchanged. It never
 modifies the database, reloads, or releases a run; release approval is not implemented yet. See
 the manual verification procedure in [docs/architecture.md](docs/architecture.md).
 

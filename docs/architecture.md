@@ -72,7 +72,9 @@ it, and produces an immutable `ConversionPlan`. It never opens a database.
 | `run.py` | Run lifecycle and evidence: reserves `output/conversion/<run_id>/`, archives the source, records validation failures, writes the record reports, verifies the source (RUN-08), calls the loader, writes `manifest.json` and `reports/load_result.json`, and recovers, formally fails, or checks the readiness of a run |
 | `reports.py` | Builds `exceptions.csv`, `exclusions.csv`, and `warnings.csv` from a `ConversionPlan` (spec section 13.1), checks them against the plan's row accounting, and checks a manifest's `reports` record against its validation summary. Pure: it writes nothing. |
 | `cli.py` | `python -m loan_lab.conversion.legacy`: reserve a run, validate and plan the extract, then load it with evidence |
-| `reconcile.py` | Phase 3: independent reconciliation (RC-01 to RC-10) of a `LOADED` run against its archived source, writing `reports/reconciliation.json` (below) |
+| `reconcile.py` | Phase 3: independent reconciliation (RC-01 to RC-12, report version 2) of a `LOADED` run against its archived source, writing `reports/reconciliation.json` (below) |
+| `eligibility.py`, `independent_rules.py` | The independent eligibility determination (spec 12.3): every source line's disposition, dependent flag, report rows, and root causes, decided from the archived source text alone. They never call the planner or use its code tables. |
+| `recorded_reports.py` | Reads the archived record reports for RC-11 and RC-12: checks each file's SHA-256 against the manifest, then parses those same bytes strictly |
 | `reconcile_cli.py` | `python -m loan_lab.conversion.legacy.reconcile_cli <run_id>`: reconcile one run |
 | `plan.py` | Frozen result types. Every source row gets one disposition, a dependent flag, rule codes, root causes, its raw line, and its mapped target values. Also holds conversion units, amount totals by disposition, and the unmapped-field inventory. |
 
@@ -212,7 +214,7 @@ print(recover_run("manual-check-1"))
 
 # 10. Reconcile the loaded run (Phase 3).
 python -m loan_lab.conversion.legacy.reconcile_cli manual-check-1; $LASTEXITCODE
-#    Expect: "Run manual-check-1 RECONCILED", PASS for RC-01 to RC-10, "Awaiting release
+#    Expect: "Run manual-check-1 RECONCILED", PASS for RC-01 to RC-12, "Awaiting release
 #            approval", and exit code 0.
 Get-Content output\conversion\manual-check-1\reports\reconciliation.json
 #    Expect: "result": "PASS", rows 16/11/1/4, 13/6/2/5, 20/10/3/7; requested amounts
@@ -235,8 +237,9 @@ reconciliation evidence (preserved; run not reconciled), or 10 report written bu
 hand when they are no longer needed.
 
 The unmapped-field report, `run.log`, and release approval are not implemented. Reconciliation
-checks the record reports' checksums and counts through `check_ready`, but does not re-derive
-their contents from the source. The source files are only read, never moved or modified.
+checks the record reports' checksums and counts through `check_ready`, and from report version 2
+compares their rows with the independent determination (RC-12). The source files are only read,
+never moved or modified.
 
 **Phase 3 (implemented): independent reconciliation.** `reconcile_run(run_id)` proves that the
 run's database holds exactly what its archived source says it should (spec section 12):
@@ -246,10 +249,10 @@ run's database holds exactly what its archived source says it should (spec secti
 | Refuse | Nothing is written, and the status is unchanged, unless `check_ready` passes, every archived source file still has its recorded SHA-256, no `-journal`/`-wal` file exists, and the database SHA-256 equals the one recorded at load time (checked again after reading). |
 | Source | The archived files are re-read by the reconciler's own CSV reader, and the control totals are re-checked against them (RC-02). |
 | Expected values | Recomputed from raw source text with the reconciler's own code tables and section 7 transformations, in `Decimal`. The conversion plan's mapped values are never used, so a wrong code table or transformation in the converter is caught. |
-| Dispositions | Re-derived by re-validating the archived files with the Phase 1 rules, then cross-checked: excluded rows must meet an exclusion criterion judged from their raw text, loaded rows must not, rejected rows must not unless rejected before exclusions (SV-01, SV-09, SV-10), and loaded rows must pass independent validation. |
+| Dispositions | Decided independently from the archived source (`eligibility.py`, spec 12.3); the planner is never run. The record reports and the manifest's counts are compared with that answer and never used as expected values. Excluded rows are also cross-checked against an exclusion criterion judged from their raw text. |
 | Target | A raw `sqlite3` connection with `mode=ro` and `PRAGMA query_only`. Amounts and rates are read as stored scaled integers and converted with `Decimal`; anything else is a discrepancy. |
-| Compare | RC-01 to RC-10, every loaded record and relationship, not a sample. Each discrepancy has a rule code, a stable `check` name, the source file, line, and key, the target table and ID, the field, expected and actual values, and an explanation. |
-| Record | Two-phase. The manifest first records the attempt (`reconciliation.state: in_progress`, not ready, still `LOADED`); then `reports/reconciliation.json` is written atomically with the same attempt ID; then the manifest is finalized with the report's SHA-256: `RECONCILED` if every rule passed (`release_review: awaiting_approval`), otherwise `FAILED` at stage `reconciliation` (`release_review: blocked`). The database and all earlier evidence stay unchanged. Nothing is released or declined. |
+| Compare | RC-01 to RC-12, every source line, loaded record, relationship, and report row, not a sample. RC-11 compares each line's disposition and target membership; RC-12 compares exception, exclusion, and warning rows (rule codes, `FIELD`, `SOURCE_VALUE`, unit keys, dependent flags, immediate root causes). Each discrepancy has a rule code, a stable `check` name, the source file, line, key, and unit, the report row it disputes, the target table and ID, the field, expected and actual values, and an explanation. |
+| Record | Two-phase. The manifest first records the attempt (`reconciliation.state: in_progress`, not ready, still `LOADED`); then `reports/reconciliation.json` (`report_version` 2) is written atomically with the same attempt ID; then the manifest is finalized with the report's SHA-256: `RECONCILED` if every rule passed with every comparison made (`release_review: awaiting_approval`), otherwise `FAILED` at stage `reconciliation` (`release_review: blocked`), with RC-11 as `failure.rule` whenever it failed. The database and all earlier evidence stay unchanged. Nothing is released or declined. |
 
 Because the comparison is field by field and relationship by relationship, it catches errors that
 counts and totals hide: swapped amounts, a wrong rate, status, or name, a guarantor on the wrong
@@ -268,14 +271,23 @@ reconciled; only a finalized manifest is. When something goes wrong:
 | Report without an attempt, from another attempt, tampered, unreadable, missing, or contradicted by a fresh comparison | Exit 9 / `ReconciliationConflictError`; `state: conflict` with the problems; report preserved; run `LOADED`, not ready. Retrying gives the same conflict. | Investigate the evidence, then `fail_run(run_id, reason)`: `FAILED` at stage `reconciliation`, evidence kept. Convert again in a new run. |
 | A `RECONCILED` run must be re-checked later | `verify_reconciliation(run_id)` lists problems: report hash, attempt, result, database or source hash drift, any release recorded | Investigate any problem. Passing verification is not release approval. |
 
-**Independence limits.** Reconciliation takes each row's disposition from re-running the Phase 1
-rules, so a planner defect that wrongly rejects a valid row reconciles cleanly (the row is neither
-expected nor present), and wrong rule codes or root causes on rejected rows are not compared.
-`tests/test_conversion_spec_acceptance.py` guards the sample extract instead. It holds
-hand-transcribed spec section 15 constants for all 13 applications: dispositions, rule codes,
-root-cause classes and originating lines, unit membership, amounts, and loaded relationships. It
-checks the planner and the loaded target against them, and shows that injected planner defects
-fail it. For other extracts, these remain reviewer responsibilities (spec section 12.1).
+**Independence limits.** Report version 2 takes every expected disposition, report row, and root
+cause from the independent determination, so a planner defect that wrongly rejects a valid row
+fails RC-11 (`wrongly_rejected` and `missing_from_target`). What remains:
+
+- Runs reconciled under report version 1 (before Milestone 10, for example `DEMO-001`) took
+  their dispositions from re-running the Phase 1 rules. Their evidence is kept and verified as
+  it was, never re-checked; the reconciliation page marks them. They cannot meet the version 2
+  standard without converting the archived source again in a new run.
+- When RC-11 disputes a line's disposition, RC-12 does not compare that line's exception and
+  exclusion rows again. It counts them (`not_evaluated` in its rule result) and is then
+  `INCOMPLETE` or `FAIL`, never `PASS`.
+- RC-12 does not compare the `MESSAGE` and `REMEDIATION` columns.
+- The specification and the independent determination share an author, so a mistake in the
+  specification itself is not caught. `tests/test_conversion_spec_acceptance.py` holds
+  hand-transcribed spec section 15 constants for the sample extract, and
+  `tests/test_reconciliation_independent.py` adds a hand-authored non-sample extract.
+- Q9 Option A (malformed `SV-01` party lines) is provisional (spec 12.7, C3).
 
 ### Synthetic failure scenarios (`loan_lab.scenarios`, Milestone 8)
 
@@ -738,7 +750,7 @@ Read-only pages over the per-run evidence in `output/conversion/<run_id>/`. The 
 | --- | --- |
 | `GET /conversions` | Runs: ID, recorded status, trust condition, source rows read, target rows loaded, requested volume loaded, reconciliation outcome, timestamps |
 | `GET /conversions/{run_id}` | Summary: status and evidence state, failure, source files and checksums, validation issues, row dispositions, financial totals, expected and loaded target counts, warnings (WN-01), reconciliation record, evidence file states |
-| `GET /conversions/{run_id}/reconciliation` | RC-01 to RC-10 results, notes, totals, and field-level discrepancies (expected and actual values, source line, target ID) |
+| `GET /conversions/{run_id}/reconciliation` | The rules of the report's own version (RC-01 to RC-10 for version 1, with a notice that it predates independent verification; RC-01 to RC-12 for version 2) with their results, notes, totals, and field-level discrepancies (expected and actual values, source line, unit, report evidence, target ID). A rule that left comparisons unmade shows `INCOMPLETE` or is flagged as incomplete. Without a report, no rule results are shown: a run never reconciled says "Reconciliation not yet performed" with the reason for its status. |
 | `GET /conversions/{run_id}/reports/{kind}` | `kind` is `exceptions`, `exclusions`, or `warnings`. The report's rows with every column; filter by text (`q`, case-insensitive substring of any value, at most 100 characters), source `file`, `rule`, and `dependent` (`Y`/`N`). Invalid filter values are ignored. |
 | `GET /conversions/{run_id}/reports/{kind}/download` | The verified report as a spreadsheet-safe CSV attachment (below) |
 
@@ -773,7 +785,9 @@ then pass these checks:
 
 - Its SHA-256 equals the checksum recorded in the manifest.
 - Its run ID, attempt, and database checksum match the manifest.
-- Its result is PASS, all ten rules pass exactly once, and it lists no discrepancies.
+- Its result is PASS, every rule of its report version (RC-01 to RC-10 for version 1, RC-01 to
+  RC-12 for version 2, which the manifest must repeat) passes exactly once, and it lists no
+  discrepancies.
 
 For a version 3 manifest, a `LOADED` or `RECONCILED` run's `reports` record must also be
 `complete`, agree with the validation summary, and each report must still hash to its recorded

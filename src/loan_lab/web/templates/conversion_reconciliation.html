@@ -6,7 +6,13 @@
 {{ c.run_header(run, "reconciliation", success_notice=false) }}
 {% set rec = run.reconciliation %}
 
-{% if not run.reconciliation_report.ok %}
+{% if view.not_performed %}
+<div class="notice" role="status" data-report="not-performed">
+  <strong>Reconciliation not yet performed.</strong> No rule has been evaluated for this run, so no results are shown.
+  <span data-field="not-performed-reason">{{ view.not_performed }}</span>
+  Recorded outcome: <strong data-field="reconciliation-outcome">{{ rec.outcome }}</strong>.
+</div>
+{% elif not run.reconciliation_report.ok %}
 <div class="notice" role="status" data-report="unavailable">
   No reconciliation report can be shown: <code>{{ run.reconciliation_report.path }}</code> is {{ run.reconciliation_report.label | lower }}{% if run.reconciliation_report.detail %} ({{ run.reconciliation_report.detail }}){% endif %}.
   Recorded outcome: <strong data-field="reconciliation-outcome">{% if rec is none %}Not available{% else %}{{ rec.outcome }}{% endif %}</strong>.
@@ -18,18 +24,29 @@
 </div>
 {% elif view.result == "PASS" %}
 <div class="notice notice-success" role="status" data-report="pass">
-  All rules RC-01 to RC-10 passed and the evidence verifies. The run awaits a separate release approval; it has <strong>not</strong> been released.
+  All rules {{ view.rules[0].rule }} to {{ view.rules[-1].rule }} passed and the evidence verifies. The run awaits a separate release approval; it has <strong>not</strong> been released.
 </div>
 {% else %}
 <div class="notice notice-danger" role="status" data-report="fail">
   Reconciliation found {{ c.count(view.discrepancies_total) }} discrepancies. The run is failed and cannot be released.
 </div>
 {% endif %}
+{% if view.report_version == 1 %}
+<div class="notice notice-warning-inline" role="status" data-report-version="1">
+  Report version 1: reconciled before independent disposition verification. RC-11 and RC-12 were never evaluated for this run, and its dispositions were re-derived by the converter's own rules. A fresh conversion, reconciled under report version 2, is needed for release.
+</div>
+{% endif %}
+{% for rule in view.unexamined_rules %}
+<div class="notice notice-warning-inline" role="status" data-unexamined="{{ rule.rule }}">
+  <strong>{{ rule.rule }} is incomplete:</strong> the row details of <span data-field="unexamined-lines">{{ rule.unexamined_lines | number }}</span> lines were not compared, because RC-11 found their dispositions wrong. Those details are unexamined, not verified. Resolve the RC-11 discrepancies first.
+</div>
+{% endfor %}
 
+{% if view.rules %}
 <section class="panel" aria-labelledby="rules">
   <header class="panel-header">
     <h2 id="rules">Rules</h2>
-    <span class="muted">Report generated: <span data-field="generated-at">{{ c.timestamp(view.generated_at) }}</span>{% if rec and rec.attempt %} · Attempt <code>{{ rec.attempt }}</code>{% endif %}</span>
+    <span class="muted">Report generated: <span data-field="generated-at">{{ c.timestamp(view.generated_at) }}</span>{% if view.report_version is not none %} · Report version <span data-field="report-version">{{ view.report_version }}</span>{% endif %}{% if rec and rec.attempt %} · Attempt <code>{{ rec.attempt }}</code>{% endif %}</span>
   </header>
   {% call c.scroll("Reconciliation rules") %}
     <table class="table">
@@ -50,6 +67,7 @@
   {% endcall %}
   {{ c.definitions(["checked"]) }}
 </section>
+{% endif %}
 
 {% if run.reconciliation_report.ok %}
 <div class="grid-2">

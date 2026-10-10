@@ -5,6 +5,7 @@ Chrome or Edge, measure the rendered layout there, and read the measurements bac
 dumped DOM. They are skipped when neither browser is installed.
 """
 
+import dataclasses
 import html
 import json
 import re
@@ -22,7 +23,10 @@ import uvicorn
 from fastapi.responses import HTMLResponse
 from fastapi.testclient import TestClient
 
-from loan_lab.conversion.legacy import run_conversion
+from loan_lab.conversion.legacy import reconcile_run, run_conversion
+from loan_lab.conversion.legacy import run as runs
+from loan_lab.conversion.legacy.contract import Rule
+from loan_lab.conversion.legacy.plan import Cause, Disposition, Issue
 from loan_lab.db import create_db_engine
 from loan_lab.main import create_app
 from loan_lab.paths import find_project_root
@@ -40,6 +44,7 @@ CTRL_RUN = "SYN-CTRL-20261009T000000Z-def456"
 SHORT_RUN = "DEMO-001"
 HOSTILE_RUN = "HOSTILE-001"
 CASES_RUN = "CASES-001"
+INCOMPLETE_RUN = "INCOMPLETE-001"
 REPORT_PAGES = (
     f"/conversions/{SHORT_RUN}/reports/exceptions",
     f"/conversions/{SHORT_RUN}/reports/exclusions",
@@ -60,6 +65,26 @@ BLANK_PAGES = (
     f"/conversions/{SHORT_RUN}/reports/exceptions",
     *(f"/conversions/{CASES_RUN}/reports/{kind}" for kind in ("exceptions", "exclusions", "warnings")),
 )
+# Every page that draws status badges. The defect run's reconciliation shows PASS and FAIL, the
+# incomplete run's shows INCOMPLETE.
+BADGE_PAGES = (
+    *LOS_PAGES,
+    "/conversions",
+    f"/conversions/{DEFECT_RUN}",
+    f"/conversions/{DEFECT_RUN}/reconciliation",
+    f"/conversions/{INCOMPLETE_RUN}",
+    f"/conversions/{INCOMPLETE_RUN}/reconciliation",
+)
+RULE_RESULT_PAGES = (
+    f"/conversions/{DEFECT_RUN}/reconciliation",
+    f"/conversions/{INCOMPLETE_RUN}/reconciliation",
+)
+# Badges whose text is drawn in --success or --danger, and the INCOMPLETE result.
+STATUS_BADGES = (
+    "result-pass", "result-fail", "result-incomplete", "condition-reconciled", "condition-failed",
+    "run-status-reconciled", "run-status-failed", "status-approved", "status-declined",
+    "pledge-active", "lien-active",
+)
 BROWSERS = (
     Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
     Path(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),
@@ -75,6 +100,55 @@ HARNESS = """<!doctype html>
 const PAGES = %(pages)s;
 const WIDTHS = %(widths)s;
 const BLANK_PAGES = %(blank_pages)s;
+const BADGE_PAGES = %(badge_pages)s;
+
+// Every badge in both themes: its text colour, and the colour actually behind it (its tint
+// composited over the opaque surface below), at rest and with its table row hovered.
+function measureBadges(win) {
+  const doc = win.document;
+  const root = doc.documentElement;
+  const parse = (color) => {
+    const v = color.match(/[0-9.]+/g).map(Number);
+    return [v[0], v[1], v[2], v.length > 3 ? v[3] : 1];
+  };
+  const behind = (el) => {
+    const layers = [];
+    for (; el; el = el.parentElement) {
+      const c = parse(win.getComputedStyle(el).backgroundColor);
+      if (c[3] > 0) layers.push(c);
+      if (c[3] >= 1) break;
+    }
+    let base = [255, 255, 255];
+    for (const c of layers.reverse()) base = base.map((b, i) => c[i] * c[3] + b * (1 - c[3]));
+    return `rgb(${base.map(Math.round).join(", ")})`;
+  };
+  const themes = {};
+  for (const theme of ["dark", "light"]) {
+    root.dataset.theme = theme;
+    themes[theme] = [...doc.querySelectorAll("main .badge")].map((el) => {
+      const style = win.getComputedStyle(el);
+      const row = el.closest(".table-hover tbody tr");
+      let hovered = null;
+      if (row) {
+        row.style.background = "var(--surface-2)";
+        hovered = behind(el);
+        row.style.background = "";
+      }
+      return {
+        classes: [...el.classList],
+        text: el.textContent.trim(),
+        result: el.dataset.result || null,
+        color: style.color,
+        background: behind(el),
+        hovered,
+        borderStyle: style.borderTopStyle,
+        borderColor: style.borderTopColor,
+      };
+    });
+  }
+  root.dataset.theme = "dark";
+  return themes;
+}
 
 // Each "Blank value" indicator, and each recorded value that literally reads "Blank value", as
 // drawn in both themes.
@@ -359,11 +433,37 @@ function load(page, width, measurement = measure) {
     for (const width of WIDTHS) results[`${page} @ ${width}`] = await load(page, width);
   }
   for (const page of BLANK_PAGES) results[`blanks ${page}`] = await load(page, 1280, measureBlanks);
+  for (const page of BADGE_PAGES) results[`badges ${page}`] = await load(page, 1280, measureBadges);
   document.getElementById("layout-results").textContent = JSON.stringify(results);
 })();
 </script>
 </body></html>
 """
+
+
+def convert_with_incomplete_rc12(run_id: str, roots: dict[str, Path]) -> None:
+    """Records borrowers.csv:12 (SV-02) as an EX-01 exclusion, so RC-11 fails and RC-12 is
+    INCOMPLETE."""
+    real_plan = runs.plan_conversion
+
+    def excluded_b12(directory: Path) -> Any:
+        plan = real_plan(directory)
+
+        def fix(row: Any) -> Any:
+            if (row.ref.file, row.ref.line) != ("borrowers.csv", 12):
+                return row
+            return dataclasses.replace(row, disposition=Disposition.EXCLUDED, issues=(
+                Issue(Rule.EX_01, "Excluded (injected).", "RECORD_STATUS", "A",
+                      (Cause(Rule.EX_01, row.ref),)),
+            ))
+
+        return dataclasses.replace(plan, borrowers=tuple(fix(r) for r in plan.borrowers))
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(runs, "plan_conversion", excluded_b12)
+        run_conversion(SAMPLE_DIR, run_id, conversion_root=roots["conversion_root"],
+                       evidence_root=roots["evidence_root"])
+    reconcile_run(run_id, evidence_root=roots["evidence_root"])
 
 
 @pytest.fixture(scope="module")
@@ -382,6 +482,7 @@ def evidence_root(tmp_path_factory: pytest.TempPathFactory) -> Path:
                    evidence_root=roots["evidence_root"])
     run_with_display_cases(CASES_RUN, conversion_root=roots["conversion_root"],
                            evidence_root=roots["evidence_root"])
+    convert_with_incomplete_rc12(INCOMPLETE_RUN, roots)
     run_scenario(Scenario.LOADER_DEFECT, DEFECT_RUN, **roots)
     run_scenario(Scenario.CONTROL_TOTALS, CTRL_RUN, **roots)
     engine = create_db_engine(f"sqlite:///{(root / 'los.db').as_posix()}")
@@ -463,7 +564,8 @@ def layout(evidence_root: Path, tmp_path_factory: pytest.TempPathFactory) -> dic
         pytest.skip("no Chrome or Edge installation found for layout tests")
     app = make_app(evidence_root)
     harness = HARNESS % {"pages": json.dumps(PAGES), "widths": json.dumps(WIDTHS),
-                         "blank_pages": json.dumps(BLANK_PAGES)}
+                         "blank_pages": json.dumps(BLANK_PAGES),
+                         "badge_pages": json.dumps(BADGE_PAGES)}
     app.add_api_route("/__layout-harness", lambda: HTMLResponse(harness), include_in_schema=False)
     port = free_port()
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
@@ -551,12 +653,12 @@ def test_table_headers_have_scope(layout: dict[str, Any], page: str, width: int)
 def test_run_links_show_compact_ids_with_full_values(layout: dict[str, Any], width: int) -> None:
     links = {link["href"].rsplit("/", 1)[-1]: link
              for link in case(layout, "/conversions", width)["runLinks"]}
-    assert set(links) == {DEFECT_RUN, CTRL_RUN, SHORT_RUN, HOSTILE_RUN, CASES_RUN}
+    assert set(links) == {DEFECT_RUN, CTRL_RUN, SHORT_RUN, HOSTILE_RUN, CASES_RUN, INCOMPLETE_RUN}
     for run_id in (DEFECT_RUN, CTRL_RUN):
         link = links[run_id]
         assert link["title"] == link["hiddenText"] == run_id
         assert link["shownText"] == f"{run_id[:14]}…{run_id[-6:]}"
-    for run_id in (SHORT_RUN, HOSTILE_RUN, CASES_RUN):
+    for run_id in (SHORT_RUN, HOSTILE_RUN, CASES_RUN, INCOMPLETE_RUN):
         assert links[run_id]["shownText"] == run_id and links[run_id]["title"] is None
 
 
@@ -668,6 +770,61 @@ def test_blank_value_indicator_is_readable_and_distinct_in_both_themes(
                 assert item["fontStyle"] == "normal" and item["border"] != "dashed", item
                 assert item["fontFamily"] != blanks[0]["fontFamily"], item
     assert result["dark"]["blanks"][0]["color"] != result["light"]["blanks"][0]["color"]
+
+
+def badges(layout: dict[str, Any], page: str) -> dict[str, list[dict[str, Any]]]:
+    result = layout[f"badges {page}"]
+    assert "error" not in result, result.get("error")
+    return result
+
+
+@pytest.mark.parametrize("page", BADGE_PAGES)
+def test_status_badges_are_readable_in_both_themes(layout: dict[str, Any], page: str) -> None:
+    result = badges(layout, page)
+
+    for theme in ("dark", "light"):
+        status = [b for b in result[theme] if set(b["classes"]) & set(STATUS_BADGES)]
+        assert status, (theme, page)
+        for badge in status:
+            for background in filter(None, (badge["background"], badge["hovered"])):
+                ratio = contrast(badge["color"], background)
+                assert ratio >= 4.5, (theme, round(ratio, 2), background, badge)
+
+
+def rule_badges(layout: dict[str, Any], theme: str) -> dict[str, list[dict[str, Any]]]:
+    found: dict[str, list[dict[str, Any]]] = {}
+    for page in RULE_RESULT_PAGES:
+        for badge in badges(layout, page)[theme]:
+            if badge["result"]:
+                found.setdefault(badge["result"], []).append(badge)
+    return found
+
+
+@pytest.mark.parametrize("theme", ["dark", "light"])
+def test_rule_results_are_distinct_without_relying_on_colour(
+    layout: dict[str, Any], theme: str
+) -> None:
+    found = rule_badges(layout, theme)
+
+    assert set(found) == {"PASS", "FAIL", "INCOMPLETE"}, set(found)
+    for result, items in found.items():
+        assert {b["text"] for b in items} == {result}, items
+        assert len({(b["color"], b["borderStyle"], b["borderColor"]) for b in items}) == 1, items
+        for badge in items:
+            assert contrast(badge["color"], badge["background"]) >= 4.5, (theme, badge)
+    passed, failed, incomplete = (found[r][0] for r in ("PASS", "FAIL", "INCOMPLETE"))
+    # Besides its label, INCOMPLETE is the only one outlined, and PASS and FAIL differ in hue.
+    assert passed["borderColor"] == "rgba(0, 0, 0, 0)" == failed["borderColor"]
+    assert incomplete["borderStyle"] == "solid"
+    assert incomplete["borderColor"] != "rgba(0, 0, 0, 0)"
+    assert len({passed["color"], failed["color"], incomplete["color"]}) == 3
+
+
+def test_rule_result_colours_follow_the_theme(layout: dict[str, Any]) -> None:
+    dark, light = rule_badges(layout, "dark"), rule_badges(layout, "light")
+    for result in ("PASS", "FAIL", "INCOMPLETE"):
+        assert dark[result][0]["color"] != light[result][0]["color"], result
+        assert dark[result][0]["background"] != light[result][0]["background"], result
 
 
 def test_wide_desktop_shows_the_run_list_without_scrolling(layout: dict[str, Any]) -> None:

@@ -1,7 +1,7 @@
 """Specification acceptance: every sample application against spec section 15, independently.
 
-Reconciliation takes each source row's disposition from re-running the planner, so a planner that
-wrongly rejects a valid application would still reconcile. These tests close that gap for the
+Reconciliation determines dispositions independently of the planner (RC-11, RC-12), but both are
+written from the same specification. These tests guard against an error shared by both for the
 sample extract: the expected dispositions, rule codes, root causes, unit membership, amounts, and
 loaded relationships below are transcribed by hand from docs/conversion-specification.md
 sections 5.4, 15.2, 15.3, and 15.5. Nothing here is computed from the planner's output.
@@ -379,7 +379,7 @@ def test_loaded_target_matches_spec(tmp_path: Path) -> None:
 # --- Injected planner misclassifications must fail these tests ------------------------------
 
 
-def test_wrongly_rejected_application_fails_acceptance_but_still_reconciles(
+def test_wrongly_rejected_application_fails_acceptance_and_reconciliation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # A planner defect that rejects the valid 60-month 0000500105 as out of range. It is the only
@@ -392,8 +392,17 @@ def test_wrongly_rejected_application_fails_acceptance_but_still_reconciles(
 
     database, result = convert_and_reconcile(tmp_path)
 
-    # Reconciliation shares the planner's dispositions, so it cannot see this (spec 12.1).
-    assert result.passed
+    # Reconciliation determines dispositions independently (spec 12.3), so RC-11 names the defect.
+    assert not result.passed
+    assert "RC-11" in {str(rule) for rule in result.failed_rules}
+    wrong = {
+        (d.check, d.file, d.line) for d in result.discrepancies
+        if d.rule == "RC-11" and d.line is not None
+    }
+    assert wrong == {
+        ("wrongly_rejected", APPLICATIONS, 6), ("missing_from_target", APPLICATIONS, 6),
+        ("wrongly_rejected", PARTIES, 11), ("missing_from_target", PARTIES, 11),
+    }
     assert target_mismatches(database) == [
         "0000500105 is loaded in the spec but is not in the target."
     ]

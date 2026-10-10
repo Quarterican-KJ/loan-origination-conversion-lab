@@ -34,14 +34,35 @@ Statuses: **Open** (a known problem), **Planned** (agreed enhancement, not start
 ### CONV-001: Planner and reconciler share disposition logic
 
 - **Priority:** P1 (correctness)
-- **Status:** Open
-- **Description:** Reconciliation decides each row's disposition by re-running the Phase 1
-  validation rules. A planner defect that wrongly rejects a valid row therefore reconciles cleanly
-  (the row is neither expected nor present), and rule codes and root causes on rejected rows are
-  not compared. For the sample extract, `tests/test_conversion_spec_acceptance.py` guards this
-  with hand-transcribed constants; for any other extract it is a reviewer responsibility. See
+- **Status:** Implemented (Milestone 10, phases 1A to 1D), pending final verification and
+  publication. Not yet committed or pushed.
+- **Description:** Reconciliation decided each row's disposition by re-running the Phase 1
+  validation rules. A planner defect that wrongly rejects a valid row therefore reconciled
+  cleanly (the row is neither expected nor present), and rule codes and root causes on rejected
+  rows were not compared. Runs reconciled that way (report version 1) keep that limit; see
   "Independence limits" in [architecture.md](architecture.md).
-- **Acceptance criteria:**
+- **Implementation (pending publication):**
+  - `eligibility.py` and `independent_rules.py` decide every source line's disposition, report
+    rows, and root causes from the archived source alone (spec 12.3). They never call the
+    planner or its tables.
+  - Converter defects C1 and C2 (spec 12.7) are corrected. C3 depends on Q9, whose Option A is
+    still provisional.
+  - Reconciliation report version 2 adds RC-11 (dispositions and target membership) and RC-12
+    (exception, exclusion, and warning rows, compared with the archived record reports). RC-01
+    to RC-10 keep their identifiers and now take their expected dispositions from the same
+    independent determination. A failed RC-11 is the manifest's primary `failure.rule`.
+  - RC-12 does not compare again the row details of lines whose disposition RC-11 already
+    disputes. It counts them, says so in its note, and is then `INCOMPLETE` (or `FAIL`), never
+    `PASS`, so the run cannot be `RECONCILED`.
+  - Runs reconciled under report version 1 are kept, verified, and shown as before, with a
+    notice that they predate independent verification. A `LOADED` run without row-level record
+    reports (manifest version below 3) is refused reconciliation without side effects.
+  - Tests: `tests/test_eligibility_evaluator.py`, `tests/test_reconciliation_independent.py`,
+    `tests/test_conversion_spec_acceptance.py`, and the reconciliation and web tests.
+- **Remaining limits:** Q9 Option A is provisional. RC-12 does not compare the `MESSAGE` and
+  `REMEDIATION` columns. The specification and the independent evaluator share an author, so
+  an error in the specification itself is not caught.
+- **Acceptance criteria (met in tests; publication pending):**
   - An independent business eligibility review decides which rows should load, without calling
     the planner's validation code.
   - Reconciliation compares the planner's dispositions, rule codes, and root causes against that
@@ -63,177 +84,6 @@ Statuses: **Open** (a known problem), **Planned** (agreed enhancement, not start
   - The result is labeled clearly as Matches, Differs, Too large, or Missing.
   - Size limits and streamed hashing keep the check bounded.
   - Tests cover a matching database, a modified database, and a missing database.
-
-### UI-006: Report tables were hard to read, and long tables hard to scroll sideways
-
-- **Priority:** P2 (usability; data was hard to read but not altered)
-- **Status:** In progress. Manual acceptance on Windows 11 failed on 2026-10-10 because the
-  browser ran outdated cached assets (see "Acceptance failure diagnosis" below); fixed and
-  awaiting a repeat manual check. Not yet committed or pushed.
-- **Description:** On `/conversions/{run_id}/reports/exceptions` (and the exclusion and warning
-  pages), the Key and Unit identifiers wrapped one character per line. Raw source lines were
-  squeezed until unreadable, and root-cause references broke inside file names. The cause was
-  `overflow-wrap: anywhere` on the report cells, which let the table shrink those columns to
-  one character wide.
-- **Fix:**
-  - Identifiers stay on one line in monospace, with exact spacing and leading zeros. A value
-    over 24 characters shows a preview that opens, in a native `<details>` disclosure, to the
-    complete value.
-  - Every source line shows a one-line preview of up to 40 characters and opens to the
-    complete, untruncated line, which wraps inside a fixed-width box. A Copy button is added
-    where the browser's clipboard API is available.
-  - Root-cause references (`RULE file:line`) never break inside; the cell wraps only between
-    references.
-  - `.table-scroll` is now a positioned container, so visually hidden text inside a table can no
-    longer widen the page.
-  - Follow-up correction (same day): at full horizontal scroll, the Source line column was
-    cramped against the table edge, and the record context (Source and Key) scrolled out of
-    view.
-    - The Source line column now has a fixed width of `min(26rem, 100vw - 5rem)` (364px at
-      768px and wider, 320px at 390px) with 1.5rem right padding. Its preview and expanded
-      value are sized to fit inside it.
-    - On screens at least 1024px wide, Source and Key stay visible as sticky columns with opaque
-      backgrounds, but only while they take at most half the scroll region. Mobile and tablet
-      keep the full scroll width.
-    - A focused control inside a table is scrolled fully into view, clear of the sticky
-      columns.
-  - Filters, downloads, evidence, escaping, themes, and conversion logic are unchanged.
-- **Acceptance criteria (met):**
-  - No identifier or reference wraps inside, and the page never scrolls sideways, at 390, 768,
-    1280, and 1920px, with every disclosure closed or open.
-  - At initial and full scroll, collapsed and expanded, the whole Source line cell and its
-    contents are in view: not cut off, not under the sticky columns, and with its right padding.
-  - Sticky columns appear only from 1024px, never overlap, take at most half the region, and
-    match the panel background in both themes. Measured: 40% of the region at 1280px and 30% at
-    1920px on Exceptions, 24% and 18% on Warnings, and 46% and 34% with long hostile keys.
-  - Keyboard focus on a Source line or Unit value brings it fully into view.
-  - Every column stays reachable in its scroll region.
-  - The complete values match the archived report exactly, including a 2,568-character hostile
-    source line.
-  - Markup in values is escaped.
-  - Every summary takes keyboard focus.
-  - `tests/test_report_readability.py` and the report pages added to `tests/test_web_layout.py`
-    cover this. The layout checks fail when the old wrapping rule is restored.
-- **Application-wide horizontal navigation (follow-ups, 2026-10-09 to 2026-10-10):** a table's
-  native horizontal scrollbar sits at the table's bottom and may auto-hide. On a long table,
-  users reviewing the top or middle rows could not scroll sideways.
-  - The first correction, a conditional "scroll dock", failed user acceptance. Its track was a
-    native scrollbar that could still auto-hide, and the dock hid itself whenever the table's
-    bottom was in view, leaving only the native scrollbar. It has been removed, with its window
-    scroll and resize listeners, its disclosure listener, and its visibility rules.
-  - Every table in the application sits in the shared `.table-scroll` region. The LOS
-    Dashboard, Applications, and Application Details tables were wrapped and labeled; the
-    conversion pages already used it.
-  - Replacement (2026-10-10): `app.js` wraps each region in a `.table-frame` that ends with the
-    table's own scrollbar.
-    - The scrollbar has Scroll left and Scroll right buttons and a drawn track and thumb. It
-      does not use the platform's native scrollbar, and the table's native scrollbar is hidden
-      while it is present.
-    - It is shown whenever the table overflows sideways and hidden otherwise. It does not
-      depend on scroll position, pointer movement, idle time, or focus.
-    - It is sticky at the bottom of its frame. It sits under the table's last row when that row
-      is in view, and otherwise pins to the bottom of the viewport. It never leaves its own
-      table's area.
-    - Active table: the table crossing the bottom edge of the viewport has its bar pinned
-      there. Every other table's bar sits under its own last row, so bars never stack or
-      overlap.
-    - The thumb can be dragged with a mouse, pen, or touch. Pressing the track moves 80% of
-      the table's width toward the press, as the buttons do.
-    - The thumb is a focusable `role="scrollbar"` control, labeled "{table} columns", with
-      `aria-controls` and `aria-valuenow` from 0 to 100. Arrow keys move it 40px; Page Up,
-      Page Down, Home, and End also work.
-    - Horizontal wheel or trackpad movement over the bar scrolls the table; vertical movement
-      still scrolls the page. Any scroll of the table itself (wheel, trackpad, touch, keyboard,
-      or focus) moves the thumb.
-    - A single ResizeObserver on each region, table, and track keeps the bar current on
-      resize, responsive layout changes, and opened disclosures.
-  - `.panel` clips with `overflow: clip`, so the bar can stick inside it. Focusing a control
-    hidden behind a pinned bar scrolls the page to reveal it.
-  - Timestamps in run summaries may now wrap. At 390px, "Oct 10, 2026 · 12:47 PM UTC" was
-    2px wider than its panel and was clipped.
-  - Tested in `tests/test_table_scrollbar.py`.
-    - Chrome is driven through the DevTools Protocol, whose Input domain sends trusted mouse,
-      wheel, touch, and key events. Chrome runs with `--hide-scrollbars`, so no native scrollbar
-      is ever drawn.
-    - It covers all 11 pages with tables at 390, 768, 1280, and 1920px.
-  - Measured:
-    - The bar is 35.4px high in every case. It is drawn, opaque, on top, and inside the viewport
-      when each overflowing table is placed at the top, middle, and bottom of the viewport.
-    - It stays drawn after 1 second idle with the pointer moved away, after clicks, and after
-      focus changes.
-    - It is pinned to the viewport bottom on long tables: Applications (100 rows) at 390 and
-      768px, and the Exceptions reports at all four widths.
-    - Thumb-to-track contrast is 5.5:1 in the light theme and 5.7:1 in the dark theme.
-    - A real mouse drag of 29–80px moved the thumb exactly that far and scrolled the table to
-      within 1px of the expected position, for example 551px for an 80px drag on Exceptions at
-      390px.
-    - Track presses moved the table toward the press on every table with room to press.
-    - Wheel input of 120px, a touch drag on the thumb, and a touch swipe on the rows all
-      scrolled the table and moved the thumb to within 1px.
-    - Tab moves from the table to Scroll left, then the thumb, then Scroll right, each with a
-      2px focus ring. End reaches the last column; with sticky Source and Key columns from
-      1280px, they stay in place.
-    - Opening the 23 hostile source-line disclosures widened the range from 1,175 to 1,593px
-      at 1280px. The thumb resized and End still reached the last column.
-    - On pages with two to five overflowing tables, dragging one thumb moved only that table.
-    - Resizing between 390, 1920, and 1280px showed and hid bars correctly, with exactly one
-      bar per table.
-    - The page never scrolls sideways.
-  - Breaking the implementation on purpose (bar not sticky, drag not scaled) failed 72 of these
-    tests. The full suite passes (1,548 passed, 2 skipped).
-  - Pending manual verification:
-    - a desktop browser with overlay or auto-hiding scrollbars (Windows 11, macOS);
-    - a physical touch device.
-  - Limitations:
-    - Automated touch input is emulated by Chrome, not a physical screen.
-    - Keyboard toggling of disclosures is not automated.
-    - While pinned, the bar covers about 35px of its own table's rows. They come into view as
-      the page scrolls, or when one of their controls is focused.
-    - `overflow: clip` needs Safari 16 or later. In older browsers the bar sits under the
-      table without pinning.
-    - Tables inserted after the page loads get no bar.
-- **Acceptance failure diagnosis (2026-10-10):** on Windows 11, the horizontal scrollbar still
-  disappeared once vertical scrolling stopped.
-  - Cause: the browser never ran the persistent scrollbar.
-    - Static files were served with no `Cache-Control` header, so Edge applied heuristic
-      freshness and reused its cached `app.js` and `app.css` without contacting the server.
-    - Evidence: the dev server log shows the 13:00 page load requesting only the HTML. Edge's
-      code cache held `app.js` from 12:28, while the new files were written at 12:46 and 12:52.
-      No service worker is involved, and the server itself served the current files.
-  - The cached files were the earlier scroll dock, whose track is a native scrollbar.
-    - Reproduced in a visible Edge 154 window at 1685×869 CSS px (2560×1440 at 150%), with
-      overlay scrollbars enabled as on Windows 11.
-    - With the dock assets, the dock's ‹ and › buttons showed but the track drew nothing: a
-      brightness range of 0 across the track, right after scrolling and after 3 seconds of
-      idle.
-    - With classic scrollbars, the same track drew a scrollbar (range 36).
-    - The current custom bar drew its thumb in both modes (range 130 after scrolling and after
-      idle). Its state stayed shown, pinned, opaque, and on top in every 100ms sample.
-    - The sticky placement worked in the real browser, so no viewport-fixed control was
-      needed.
-  - Fix:
-    - Static files are served with `Cache-Control: no-cache`, so browsers revalidate every use;
-      unchanged files return 304.
-    - Pages request assets as `?v=<content hash>`, so a changed file gets a new URL even in a
-      browser holding an old copy.
-    - The scrollbar implementation is unchanged.
-  - Verified in visible Edge with overlay scrollbars against the running dev server.
-    - The first load fetched `app.css?v=60be624f735f`, `theme.js?v=2f6bc5644914`, and
-      `app.js?v=d0621eb55ecc` with `no-cache`; a reload revalidated all three (304).
-    - After real wheel scrolling and 3.25 seconds of idle, all 13 samples showed the bar drawn,
-      pinned, opaque, and on top.
-  - Regression tests:
-    - `tests/test_table_scrollbar.py` turns on Chrome's overlay scrollbars and scrolls with real
-      wheel input to mid-table. It then requires the bar to stay drawn and pinned in samples
-      every 0.25 seconds through 3.2 seconds of idle. It also checks that hiding the thumb
-      changes the screenshot, proving the thumb paints pixels. It runs on Exceptions at
-      1707×869 in both themes, at 390px, on the hostile report at 1280px, and on Applications
-      at 768px.
-    - A thumb that fades after 1 second and a transparent thumb each failed it.
-    - `tests/test_web.py` checks the cache header, 304 revalidation, and versioned asset URLs.
-  - The full suite passes (1,558 passed, 2 skipped).
-  - Next manual check: reload the page in Edge once. The page now requests the new versioned
-    assets, so no cache clearing is needed. Then repeat the vertical scroll and idle test.
 
 ## Planned Enhancements
 
@@ -364,7 +214,7 @@ Statuses: **Open** (a known problem), **Planned** (agreed enhancement, not start
 ### UI-007: Blank report values looked like a rendering problem
 
 - **Priority:** P3 (enhancement; display only)
-- **Status:** Resolved, pending publication. Tested on 2026-10-10; not yet committed or pushed.
+- **Status:** Resolved. Tested on 2026-10-10 and published in `d4bbdc6` (2026-10-10).
 - **Description:** In the Exceptions, Exclusions, and Warnings reports, a field whose recorded
   value is empty or only whitespace showed nothing after its label (for example `LAST_NAME:`).
   The same applied to empty Expected and Actual values in reconciliation discrepancies.
@@ -391,10 +241,180 @@ Statuses: **Open** (a known problem), **Planned** (agreed enhancement, not start
     that the label is legible (contrast of at least 4.5:1) and distinct from values in the dark
     and light themes. The full suite passes (1,605 passed, 2 skipped).
 
+### UI-006: Report tables were hard to read, and long tables hard to scroll sideways
+
+- **Priority:** P2 (usability; data was hard to read but not altered)
+- **Status:** Resolved. Published in `d4bbdc6` (2026-10-10). The first manual acceptance on
+  Windows 11 failed because the browser ran outdated cached assets (see "Acceptance failure
+  diagnosis" below); after the cache fix, the repeat manual acceptance on Windows 11 passed on
+  2026-10-10. Not manually verified on macOS or a physical touch device.
+- **Description:** On `/conversions/{run_id}/reports/exceptions` (and the exclusion and warning
+  pages), the Key and Unit identifiers wrapped one character per line. Raw source lines were
+  squeezed until unreadable, and root-cause references broke inside file names. The cause was
+  `overflow-wrap: anywhere` on the report cells, which let the table shrink those columns to
+  one character wide.
+- **Fix:**
+  - Identifiers stay on one line in monospace, with exact spacing and leading zeros. A value
+    over 24 characters shows a preview that opens, in a native `<details>` disclosure, to the
+    complete value.
+  - Every source line shows a one-line preview of up to 40 characters and opens to the
+    complete, untruncated line, which wraps inside a fixed-width box. A Copy button is added
+    where the browser's clipboard API is available.
+  - Root-cause references (`RULE file:line`) never break inside; the cell wraps only between
+    references.
+  - `.table-scroll` is now a positioned container, so visually hidden text inside a table can no
+    longer widen the page.
+  - Follow-up correction (same day): at full horizontal scroll, the Source line column was
+    cramped against the table edge, and the record context (Source and Key) scrolled out of
+    view.
+    - The Source line column now has a fixed width of `min(26rem, 100vw - 5rem)` (364px at
+      768px and wider, 320px at 390px) with 1.5rem right padding. Its preview and expanded
+      value are sized to fit inside it.
+    - On screens at least 1024px wide, Source and Key stay visible as sticky columns with opaque
+      backgrounds, but only while they take at most half the scroll region. Mobile and tablet
+      keep the full scroll width.
+    - A focused control inside a table is scrolled fully into view, clear of the sticky
+      columns.
+  - Filters, downloads, evidence, escaping, themes, and conversion logic are unchanged.
+- **Acceptance criteria (met):**
+  - No identifier or reference wraps inside, and the page never scrolls sideways, at 390, 768,
+    1280, and 1920px, with every disclosure closed or open.
+  - At initial and full scroll, collapsed and expanded, the whole Source line cell and its
+    contents are in view: not cut off, not under the sticky columns, and with its right padding.
+  - Sticky columns appear only from 1024px, never overlap, take at most half the region, and
+    match the panel background in both themes. Measured: 40% of the region at 1280px and 30% at
+    1920px on Exceptions, 24% and 18% on Warnings, and 46% and 34% with long hostile keys.
+  - Keyboard focus on a Source line or Unit value brings it fully into view.
+  - Every column stays reachable in its scroll region.
+  - The complete values match the archived report exactly, including a 2,568-character hostile
+    source line.
+  - Markup in values is escaped.
+  - Every summary takes keyboard focus.
+  - `tests/test_report_readability.py` and the report pages added to `tests/test_web_layout.py`
+    cover this. The layout checks fail when the old wrapping rule is restored.
+- **Application-wide horizontal navigation (follow-ups, 2026-10-09 to 2026-10-10):** a table's
+  native horizontal scrollbar sits at the table's bottom and may auto-hide. On a long table,
+  users reviewing the top or middle rows could not scroll sideways.
+  - The first correction, a conditional "scroll dock", failed user acceptance. Its track was a
+    native scrollbar that could still auto-hide, and the dock hid itself whenever the table's
+    bottom was in view, leaving only the native scrollbar. It has been removed, with its window
+    scroll and resize listeners, its disclosure listener, and its visibility rules.
+  - Every table in the application sits in the shared `.table-scroll` region. The LOS
+    Dashboard, Applications, and Application Details tables were wrapped and labeled; the
+    conversion pages already used it.
+  - Replacement (2026-10-10): `app.js` wraps each region in a `.table-frame` that ends with the
+    table's own scrollbar.
+    - The scrollbar has Scroll left and Scroll right buttons and a drawn track and thumb. It
+      does not use the platform's native scrollbar, and the table's native scrollbar is hidden
+      while it is present.
+    - It is shown whenever the table overflows sideways and hidden otherwise. It does not
+      depend on scroll position, pointer movement, idle time, or focus.
+    - It is sticky at the bottom of its frame. It sits under the table's last row when that row
+      is in view, and otherwise pins to the bottom of the viewport. It never leaves its own
+      table's area.
+    - Active table: the table crossing the bottom edge of the viewport has its bar pinned
+      there. Every other table's bar sits under its own last row, so bars never stack or
+      overlap.
+    - The thumb can be dragged with a mouse, pen, or touch. Pressing the track moves 80% of
+      the table's width toward the press, as the buttons do.
+    - The thumb is a focusable `role="scrollbar"` control, labeled "{table} columns", with
+      `aria-controls` and `aria-valuenow` from 0 to 100. Arrow keys move it 40px; Page Up,
+      Page Down, Home, and End also work.
+    - Horizontal wheel or trackpad movement over the bar scrolls the table; vertical movement
+      still scrolls the page. Any scroll of the table itself (wheel, trackpad, touch, keyboard,
+      or focus) moves the thumb.
+    - A single ResizeObserver on each region, table, and track keeps the bar current on
+      resize, responsive layout changes, and opened disclosures.
+  - `.panel` clips with `overflow: clip`, so the bar can stick inside it. Focusing a control
+    hidden behind a pinned bar scrolls the page to reveal it.
+  - Timestamps in run summaries may now wrap. At 390px, "Oct 10, 2026 · 12:47 PM UTC" was
+    2px wider than its panel and was clipped.
+  - Tested in `tests/test_table_scrollbar.py`.
+    - Chrome is driven through the DevTools Protocol, whose Input domain sends trusted mouse,
+      wheel, touch, and key events. Chrome runs with `--hide-scrollbars`, so no native scrollbar
+      is ever drawn.
+    - It covers all 11 pages with tables at 390, 768, 1280, and 1920px.
+  - Measured:
+    - The bar is 35.4px high in every case. It is drawn, opaque, on top, and inside the viewport
+      when each overflowing table is placed at the top, middle, and bottom of the viewport.
+    - It stays drawn after 1 second idle with the pointer moved away, after clicks, and after
+      focus changes.
+    - It is pinned to the viewport bottom on long tables: Applications (100 rows) at 390 and
+      768px, and the Exceptions reports at all four widths.
+    - Thumb-to-track contrast is 5.5:1 in the light theme and 5.7:1 in the dark theme.
+    - A real mouse drag of 29–80px moved the thumb exactly that far and scrolled the table to
+      within 1px of the expected position, for example 551px for an 80px drag on Exceptions at
+      390px.
+    - Track presses moved the table toward the press on every table with room to press.
+    - Wheel input of 120px, a touch drag on the thumb, and a touch swipe on the rows all
+      scrolled the table and moved the thumb to within 1px.
+    - Tab moves from the table to Scroll left, then the thumb, then Scroll right, each with a
+      2px focus ring. End reaches the last column; with sticky Source and Key columns from
+      1280px, they stay in place.
+    - Opening the 23 hostile source-line disclosures widened the range from 1,175 to 1,593px
+      at 1280px. The thumb resized and End still reached the last column.
+    - On pages with two to five overflowing tables, dragging one thumb moved only that table.
+    - Resizing between 390, 1920, and 1280px showed and hid bars correctly, with exactly one
+      bar per table.
+    - The page never scrolls sideways.
+  - Breaking the implementation on purpose (bar not sticky, drag not scaled) failed 72 of these
+    tests. The full suite passes (1,548 passed, 2 skipped).
+  - Manual verification: passed on Windows 11 (2026-10-10, after the cache fix below). Not yet
+    checked on macOS or a physical touch device.
+  - Limitations:
+    - Automated touch input is emulated by Chrome, not a physical screen.
+    - Keyboard toggling of disclosures is not automated.
+    - While pinned, the bar covers about 35px of its own table's rows. They come into view as
+      the page scrolls, or when one of their controls is focused.
+    - `overflow: clip` needs Safari 16 or later. In older browsers the bar sits under the
+      table without pinning.
+    - Tables inserted after the page loads get no bar.
+- **Acceptance failure diagnosis (2026-10-10):** on Windows 11, the horizontal scrollbar still
+  disappeared once vertical scrolling stopped.
+  - Cause: the browser never ran the persistent scrollbar.
+    - Static files were served with no `Cache-Control` header, so Edge applied heuristic
+      freshness and reused its cached `app.js` and `app.css` without contacting the server.
+    - Evidence: the dev server log shows the 13:00 page load requesting only the HTML. Edge's
+      code cache held `app.js` from 12:28, while the new files were written at 12:46 and 12:52.
+      No service worker is involved, and the server itself served the current files.
+  - The cached files were the earlier scroll dock, whose track is a native scrollbar.
+    - Reproduced in a visible Edge 154 window at 1685×869 CSS px (2560×1440 at 150%), with
+      overlay scrollbars enabled as on Windows 11.
+    - With the dock assets, the dock's ‹ and › buttons showed but the track drew nothing: a
+      brightness range of 0 across the track, right after scrolling and after 3 seconds of
+      idle.
+    - With classic scrollbars, the same track drew a scrollbar (range 36).
+    - The current custom bar drew its thumb in both modes (range 130 after scrolling and after
+      idle). Its state stayed shown, pinned, opaque, and on top in every 100ms sample.
+    - The sticky placement worked in the real browser, so no viewport-fixed control was
+      needed.
+  - Fix:
+    - Static files are served with `Cache-Control: no-cache`, so browsers revalidate every use;
+      unchanged files return 304.
+    - Pages request assets as `?v=<content hash>`, so a changed file gets a new URL even in a
+      browser holding an old copy.
+    - The scrollbar implementation is unchanged.
+  - Verified in visible Edge with overlay scrollbars against the running dev server.
+    - The first load fetched `app.css?v=60be624f735f`, `theme.js?v=2f6bc5644914`, and
+      `app.js?v=d0621eb55ecc` with `no-cache`; a reload revalidated all three (304).
+    - After real wheel scrolling and 3.25 seconds of idle, all 13 samples showed the bar drawn,
+      pinned, opaque, and on top.
+  - Regression tests:
+    - `tests/test_table_scrollbar.py` turns on Chrome's overlay scrollbars and scrolls with real
+      wheel input to mid-table. It then requires the bar to stay drawn and pinned in samples
+      every 0.25 seconds through 3.2 seconds of idle. It also checks that hiding the thumb
+      changes the screenshot, proving the thumb paints pixels. It runs on Exceptions at
+      1707×869 in both themes, at 390px, on the hostile report at 1280px, and on Applications
+      at 768px.
+    - A thumb that fades after 1 second and a transparent thumb each failed it.
+    - `tests/test_web.py` checks the cache header, 304 revalidation, and versioned asset URLs.
+  - The full suite passes (1,558 passed, 2 skipped).
+  - Repeat manual check: passed on Windows 11 (reported by the user on 2026-10-10).
+
 ### CONV-002: Exception, exclusion, and warning reports are not produced
 
 - **Priority:** P2 (functionality gap)
-- **Status:** Resolved, pending publication. Tested on 2026-10-09; not yet committed or pushed.
+- **Status:** Resolved. Tested on 2026-10-09 and published in `d4bbdc6` (2026-10-10).
 - **Description:** Rejected rows, excluded rows, and warnings appeared only as counts and rule
   codes from the manifest's validation summary. The run detail page said the reports "are not
   produced yet". Reviewers could not see a per-row list with the reason for each row.
@@ -428,8 +448,8 @@ Statuses: **Open** (a known problem), **Planned** (agreed enhancement, not start
 ### UI-005: Conversion tables clipped their rightmost columns
 
 - **Priority:** P2 (usability; data was hidden but not altered)
-- **Status:** Resolved, pending final GitHub publication. Tested on 2026-10-09; not yet
-  committed.
+- **Status:** Resolved. Tested on 2026-10-09 and published in `02a3699` (2026-10-09). Milestone
+  9 (`d4bbdc6`) extended the same scroll regions to every table (UI-006).
 - **Description:** On narrower windows, the `/conversions` run table cut off its rightmost
   columns. Its natural width was about 1,720px. Several tables on the run detail and
   reconciliation pages sat outside any scroll container, so their panels clipped them.

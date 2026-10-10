@@ -33,6 +33,8 @@ from loan_lab.conversion.legacy.reconcile import (
     RECONCILIATION_REPORT_NAME,
     RULE_TITLES,
     ReconciliationRule,
+    report_rules,
+    report_version_problems,
 )
 from loan_lab.conversion.legacy.reports import (
     COLUMNS as REPORT_COLUMNS,
@@ -376,6 +378,8 @@ class Reconciliation:
     error: str | None
     # Plain-language outcome; never "released".
     outcome: str
+    # Rules that left comparisons unmade (report version 2).
+    rules_incomplete: tuple[str, ...] = ()
 
 
 REPORT_TITLES = {
@@ -484,6 +488,8 @@ class RuleView:
     checked: int | None
     discrepancies: int | None
     note: str | None
+    # Lines whose row details the rule did not compare (report version 2, RC-12 only).
+    unexamined_lines: int | None = None
 
 
 @dataclass(frozen=True)
@@ -499,6 +505,9 @@ class DiscrepancyView:
     expected: str | None
     actual: str | None
     message: str | None
+    # Report version 2 only; absent from earlier reports.
+    unit_key: str | None = None
+    evidence: str | None = None
 
 
 @dataclass(frozen=True)
@@ -516,6 +525,13 @@ class ReconciliationView:
     rows: Mapping[str, RowCounts]
     amounts: Mapping[str, Decimal | None]
     target: TargetCounts | None
+    report_version: int | None
+    # Set when no reconciliation has been attempted: why, for this run's status.
+    not_performed: str | None = None
+
+    @property
+    def unexamined_rules(self) -> tuple[RuleView, ...]:
+        return tuple(rule for rule in self.rules if rule.unexamined_lines)
 
 
 @dataclass(frozen=True)
@@ -895,6 +911,7 @@ def _reconciliation(
         problems=tuple(report_problems) + _texts(record.get("problems")),
         error=_text(record.get("error")),
         outcome=outcome,
+        rules_incomplete=_texts(record.get("rules_incomplete")),
     )
 
 
@@ -916,14 +933,17 @@ def _report_problems(
     if _sha(_dig(report, "database", "sha256")) != database_sha:
         problems.append("The reconciliation report and manifest disagree about the database.")
     if record.get("result") == "passed":
-        rules = _rule_results(report)
         if report.get("result") != "PASS":
             problems.append(f"{RECONCILIATION_REPORT_FILE} does not record a PASS.")
-        if any(rules.get(rule, (None,))[0] != "PASS" for rule in RULES):
-            problems.append("Not every rule RC-01 to RC-10 is recorded as PASS.")
+        # Each report is held to the rules of its own report_version (spec 12.2).
+        problems.extend(report_version_problems(report, record))
         if report.get("discrepancies") != []:
             problems.append("The report lists discrepancies, or none can be read.")
     return problems
+
+
+# INCOMPLETE: no discrepancies, but comparisons were left unmade (report version 2, spec 12.4).
+_RULE_RESULTS = ("PASS", "FAIL", "INCOMPLETE")
 
 
 def _rule_results(report: Mapping[str, Any]) -> dict[str, tuple[str | None, Mapping[str, Any]]]:
@@ -939,7 +959,7 @@ def _rule_results(report: Mapping[str, Any]) -> dict[str, tuple[str | None, Mapp
                 results[rule] = (None, {})
             continue
         result = _dig(item, "result")
-        results[rule] = (result if result in ("PASS", "FAIL") else None, item)
+        results[rule] = (result if result in _RULE_RESULTS else None, item)
     return results
 
 
@@ -967,11 +987,14 @@ def load_reconciliation(root: Path | None, run_id: str) -> ReconciliationView | 
         and run.condition in (Condition.RECONCILED, Condition.FAILED)
     )
     if report is None:
+        # Without a report no rule has a result to show (spec 12.2).
         return ReconciliationView(
-            run, False, tuple(report_problems), None, None,
-            tuple(RuleView(r, RULE_TITLES[r], None, None, None, None) for r in RULES),
-            None, (), {}, (), {}, {}, None,
+            run, False, tuple(report_problems), None, None, (), None, (), {}, (), {}, {}, None,
+            None, not_performed=_not_performed(run),
         )
+    version = report.get("report_version")
+    # A version 1 report is shown without RC-11 and RC-12, which it never evaluated.
+    shown_rules = report_rules(report) or RULES
     rule_results = _rule_results(report)
     rules = tuple(
         RuleView(
@@ -981,16 +1004,19 @@ def load_reconciliation(root: Path | None, run_id: str) -> ReconciliationView | 
             checked=_count(_dig(rule_results.get(rule, (None, {}))[1], "checked")),
             discrepancies=_count(_dig(rule_results.get(rule, (None, {}))[1], "discrepancies")),
             note=_text(_dig(rule_results.get(rule, (None, {}))[1], "note")),
+            unexamined_lines=_count(
+                _dig(rule_results.get(rule, (None, {}))[1], "not_evaluated", "lines")
+            ),
         )
-        for rule in RULES
+        for rule in shown_rules
     )
     raw = report.get("discrepancies")
     items = raw if isinstance(raw, list) else []
     shown = tuple(_discrepancy(item) for item in items[:MAX_DISCREPANCIES_SHOWN])
     by_rule = {
-        str(rule): tuple(d for d in shown if d.rule == rule) for rule in RULES
+        str(rule): tuple(d for d in shown if d.rule == rule) for rule in shown_rules
     }
-    other = tuple(d for d in shown if d.rule not in RULES)
+    other = tuple(d for d in shown if d.rule not in shown_rules)
     totals = _dig(report, "totals")
     result = report.get("result")
     return ReconciliationView(
@@ -1012,6 +1038,47 @@ def load_reconciliation(root: Path | None, run_id: str) -> ReconciliationView | 
             )
         },
         target=_target_counts(_dig(totals, "target")),
+        report_version=version if type(version) is int else None,
+    )
+
+
+def _not_performed(run: RunView) -> str | None:
+    """Why no reconciliation exists yet, or None if a missing report is itself a problem."""
+    record = run.reconciliation
+    if (
+        not run.manifest.ok
+        or record is None
+        or record.outcome != "Not run"
+        or run.reconciliation_report.state is not FileState.MISSING
+        or run.status == "RECONCILED"
+        or (run.failure is not None and run.failure.stage == "reconciliation")
+    ):
+        return None
+    if run.status == "LOADED":
+        version = _dig(run.manifest.data, "manifest_version")
+        if type(version) is int and version < 3:
+            return (
+                f"The run is loaded but predates row-level record reports (manifest version "
+                f"{version}). Reconciling it would be refused, because RC-11 and RC-12 cannot be "
+                "evaluated without them; the archived source must be converted again in a new run."
+            )
+        if run.ready_for_reconciliation:
+            return (
+                "The run is loaded and ready. An operator reconciles it from the command line "
+                f"(python -m loan_lab.conversion.legacy.reconcile_cli {run.run_id}); this page "
+                "never starts one."
+            )
+        return "The run is loaded but not ready for reconciliation; the run summary shows why."
+    if run.status == "FAILED":
+        stage = run.failure.stage if run.failure is not None else None
+        where = f" at stage {stage}" if stage else ""
+        return (
+            f"The run failed{where} before reconciliation, so it is never reconciled. A corrected "
+            "source is converted in a new run."
+        )
+    return (
+        f"The run's status is {run.status or 'not recorded'}. Only a LOADED run can be "
+        "reconciled."
     )
 
 
@@ -1034,6 +1101,8 @@ def _discrepancy(value: Any) -> DiscrepancyView:
         expected=text("expected"),
         actual=text("actual"),
         message=text("message"),
+        unit_key=text("unit_key"),
+        evidence=text("evidence"),
     )
 
 

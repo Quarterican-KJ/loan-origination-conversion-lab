@@ -275,6 +275,8 @@ def _validate_borrower(draft: _Draft) -> None:
 
     customer_type = draft.value("CUST_TYPE")
     if customer_type not in contract.CUSTOMER_TYPES:
+        # Only the checks that need a known type are skipped (spec 12.3.2).
+        _check_middle_initial(draft)
         return
     person_fields = ("LAST_NAME", "FIRST_NAME", "MIDDLE_INIT")
     if customer_type == contract.INDIVIDUAL:
@@ -283,9 +285,7 @@ def _validate_borrower(draft: _Draft) -> None:
         if not _blank(draft.value("BUSINESS_NAME")):
             draft.reject(Rule.SV_08, "BUSINESS_NAME must be empty for an individual.",
                          "BUSINESS_NAME")
-        initial = draft.value("MIDDLE_INIT").strip()
-        if initial and not contract.MIDDLE_INITIAL_PATTERN.fullmatch(initial):
-            draft.reject(Rule.SV_08, "MIDDLE_INIT must be a single letter.", "MIDDLE_INIT")
+        _check_middle_initial(draft)
     else:
         _require(draft, ("BUSINESS_NAME",))
         _check_lengths(draft, ("BUSINESS_NAME",))
@@ -294,6 +294,12 @@ def _validate_borrower(draft: _Draft) -> None:
                 draft.reject(
                     Rule.SV_08, f"{field} must be empty for customer type {customer_type}.", field
                 )
+
+
+def _check_middle_initial(draft: _Draft) -> None:
+    initial = draft.value("MIDDLE_INIT").strip()
+    if initial and not contract.MIDDLE_INITIAL_PATTERN.fullmatch(initial):
+        draft.reject(Rule.SV_08, "MIDDLE_INIT must be a single letter.", "MIDDLE_INIT")
 
 
 def _check_lengths(draft: _Draft, fields: Iterable[str]) -> None:
@@ -533,11 +539,11 @@ def _check_unit(application: _Draft, parties: list[_Draft]) -> None:
             f"{_lines(primaries)}); no row is chosen.",
         )
     if not loadable_primaries:
-        explained = any(p in rejected for p in primaries)
+        # Only the rejected PRI rows explain a missing primary; with none, RF-06 is its own cause.
         application.reject(
             Rule.RF_06,
             "No loadable primary borrower; none is promoted or created.",
-            causes=() if explained else None,
+            causes=[c for p in primaries for c in p.own_causes()] or None,
         )
 
 

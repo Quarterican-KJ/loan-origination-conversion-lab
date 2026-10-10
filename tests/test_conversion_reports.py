@@ -174,11 +174,15 @@ def test_dependent_rejections_point_to_their_unit_root_cause(sample: Lab) -> Non
     assert by_line["13"]["UNIT_KEY"] == "0000500107"
     assert by_line["14"]["ROOT_CAUSE"] == "SV-05 applications.csv:9"
     assert by_line["20"]["ROOT_CAUSE"] == "RF-06 applications.csv:14"
-    # The application of a unit with rejected relationships names them as its root cause.
-    unit = [r for r in rows if r["FILE_NAME"] == APPLICATIONS and r["LINE_NO"] == "10"]
-    for row in unit:
-        assert "application_parties.csv:15" in row["ROOT_CAUSE"]
-        assert "application_parties.csv:16" in row["ROOT_CAUSE"]
+    # RF-07 names every rejected relationship; RF-06 only the rejected primary (spec 12.3.4).
+    unit = {
+        r["RULE_CODE"]: r for r in rows if r["FILE_NAME"] == APPLICATIONS and r["LINE_NO"] == "10"
+    }
+    assert unit["RF-07"]["ROOT_CAUSE"] == (
+        "RF-03 application_parties.csv:15; RF-02 application_parties.csv:16"
+    )
+    assert unit["RF-06"]["ROOT_CAUSE"] == "RF-03 application_parties.csv:15"
+    for row in unit.values():
         assert row["UNIT_KEY"] == "0000500109" and row["DEPENDENT"] == "N"
 
 
@@ -326,7 +330,7 @@ def test_inconsistent_manifest_counts_block_reconciliation(lab: Lab) -> None:
     assert any("exceptions.csv disagrees" in p for p in problems)
 
 
-def test_runs_that_predate_reports_stay_ready(lab: Lab) -> None:
+def test_runs_that_predate_reports_stay_ready_but_cannot_be_reconciled(lab: Lab) -> None:
     lab.run()
     manifest_path = lab.directory() / "manifest.json"
     manifest = json.loads(manifest_path.read_text("utf-8"))
@@ -335,9 +339,13 @@ def test_runs_that_predate_reports_stay_ready(lab: Lab) -> None:
     run_module.write_json_atomic(manifest_path, manifest)
     for name in REPORT_NAMES:
         (lab.directory() / "reports" / name).unlink()
+    before = manifest_path.read_bytes()
 
     assert check_ready("run-1", evidence_root=lab.evidence).ready
-    assert reconcile_run("run-1", evidence_root=lab.evidence).passed
+    with pytest.raises(ReconciliationRefusedError, match="predates row-level reports"):
+        reconcile_run("run-1", evidence_root=lab.evidence)
+    assert manifest_path.read_bytes() == before
+    assert not (lab.directory() / "reports" / "reconciliation.json").exists()
 
 
 # --- Report-writing failures -----------------------------------------------------------------

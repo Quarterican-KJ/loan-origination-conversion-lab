@@ -38,7 +38,7 @@ from loan_lab.paths import find_project_root
 
 SAMPLE_DIR = find_project_root(Path(__file__)) / "sample_data" / "legacy"
 RC = ReconciliationRule
-ALL_RULES = [f"RC-{n:02d}" for n in range(1, 11)]
+ALL_RULES = [f"RC-{n:02d}" for n in range(1, 13)]
 
 
 class Workspace:
@@ -477,13 +477,19 @@ def test_guarantor_on_the_wrong_application_is_detected(
     result = ws.reconcile()
 
     # Counts, totals, and role distributions all still match.
-    assert failed(result) == {"RC-08"}
+    assert failed(result) == {"RC-08", "RC-11"}
     missing = found(result, "RC-08", "missing_relationship")
     unexpected = found(result, "RC-08", "unexpected_relationship")
     assert [(d.source_key, d.line, d.expected) for d in missing] == [
         ("0000500101/00010002", 3, "guarantor"),
     ]
     assert [(d.source_key, d.actual) for d in unexpected] == [("0000500101/00010006", "guarantor")]
+    # The loaded party line has lost its own target record (target membership, spec 12.4).
+    [absent] = found(result, "RC-11")
+    assert (absent.check, absent.line, absent.target_table, absent.expected, absent.actual) == (
+        "missing_from_target", 3, "application_party", "present", "absent",
+    )
+    assert ws.manifest()["failure"]["rule"] == "RC-11"
 
 
 def test_wrong_role_is_detected(ws: Workspace, monkeypatch: pytest.MonkeyPatch) -> None:

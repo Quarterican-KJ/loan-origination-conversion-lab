@@ -10,14 +10,13 @@ should. To catch defects in the planner and the loader, it shares as little with
 * The target is queried through a raw, read-only SQLite connection (``mode=ro`` and
   ``query_only``). Stored amounts and rates are read as their scaled integers and converted with
   ``Decimal``, never ``float``.
-* Which rows *should* have loaded (each row's disposition) comes from re-validating the archived
-  files with the Phase 1 rules. That accounting is cross-checked: excluded rows must meet an
-  exclusion criterion, loaded and (most) rejected rows must not, and every loaded row must pass
-  this module's own validation and transformations. A valid row that the planner wrongly rejects
-  is *not* detected here; tests/test_conversion_spec_acceptance.py guards the sample's
-  dispositions against spec section 15 instead.
+* Which lines *should* have loaded, and every expected report row, cause, and warning, come from
+  :mod:`eligibility`, an independent determination from the archived source (spec 12.3). The
+  planner is never run. Its recorded decisions (the record reports and the manifest's counts)
+  are actual evidence: RC-11 compares dispositions and target membership with the independent
+  answer, and RC-12 compares the report rows themselves.
 
-A run passes only if every rule RC-01 to RC-10 matches. The outcome is written atomically to
+A run passes only if every rule RC-01 to RC-12 matches. The outcome is written atomically to
 ``reports/reconciliation.json``, and the run becomes ``RECONCILED`` (awaiting a human release
 decision) or ``FAILED`` at stage ``reconciliation``. The manifest records the attempt before the
 report is written and is finalized after it, so a report never stands for a finalized outcome on
@@ -41,13 +40,29 @@ from pathlib import Path
 from typing import Any
 
 from loan_lab.conversion.legacy import contract
+from loan_lab.conversion.legacy import recorded_reports as recorded_evidence
 from loan_lab.conversion.legacy import run as runs
-from loan_lab.conversion.legacy.plan import ConversionPlan, Disposition, RowResult
-from loan_lab.conversion.legacy.planner import plan_conversion
+from loan_lab.conversion.legacy.eligibility import (
+    Cause,
+    Disposition,
+    EligibilityResult,
+    ExpectedLine,
+    ReportRow,
+    evaluate_source,
+)
+from loan_lab.conversion.legacy.independent_rules import STAGES
+from loan_lab.conversion.legacy.recorded_reports import (
+    EXCEPTIONS,
+    EXCLUSIONS,
+    WARNINGS,
+    RecordedReports,
+    RecordedReportsError,
+    RecordedRow,
+    read_recorded_reports,
+)
 from loan_lab.conversion.legacy.run import RunStatus, check_ready
-from loan_lab.conversion.legacy.source import SourceValidationError
 
-REPORT_VERSION = 1
+REPORT_VERSION = 2
 RECONCILIATION_REPORT_NAME = "reconciliation.json"
 
 BORROWERS, APPLICATIONS, PARTIES = contract.DATA_FILES
@@ -102,6 +117,8 @@ class ReconciliationRule(StrEnum):
     RC_08 = "RC-08"
     RC_09 = "RC-09"
     RC_10 = "RC-10"
+    RC_11 = "RC-11"
+    RC_12 = "RC-12"
 
 
 RC = ReconciliationRule
@@ -116,7 +133,22 @@ RULE_TITLES: Mapping[ReconciliationRule, str] = {
     RC.RC_08: "Relationships",
     RC.RC_09: "Primary borrower",
     RC.RC_10: "Customers without converted applications",
+    RC.RC_11: "Independent dispositions and target membership",
+    RC.RC_12: "Independent report rows and warnings",
 }
+# The rules a report of each version must record as PASS for a passed result (spec 12.2). A
+# version 1 report predates RC-11 and RC-12; it is neither failed for lacking them nor shown as
+# having passed them. Any other version does not verify.
+REPORT_RULES: Mapping[int, tuple[ReconciliationRule, ...]] = {
+    1: tuple(RC)[:10],
+    2: tuple(RC),
+}
+
+
+def report_rules(report: Mapping[str, Any]) -> tuple[ReconciliationRule, ...] | None:
+    """The rules ``report`` is held to under its own ``report_version``; None if unknown."""
+    version = report.get("report_version")
+    return REPORT_RULES.get(version) if type(version) is int else None
 
 
 class ReconciliationRefusedError(Exception):
@@ -141,6 +173,10 @@ class Discrepancy:
     file: str | None = None
     line: int | None = None
     source_key: str | None = None
+    # The line's conversion unit (APPL_NO), when it has one (spec 12.3.3).
+    unit_key: str | None = None
+    # The recorded evidence holding the disputed value, such as ``reports/exceptions.csv:7``.
+    evidence: str | None = None
     target_table: str | None = None
     target_id: int | None = None
     field: str | None = None
@@ -154,6 +190,8 @@ class Discrepancy:
             "file": self.file,
             "line": self.line,
             "source_key": self.source_key,
+            "unit_key": self.unit_key,
+            "evidence": self.evidence,
             "target_table": self.target_table,
             "target_id": self.target_id,
             "field": self.field,
@@ -170,10 +208,24 @@ class RuleResult:
     checked: int
     discrepancies: int
     note: str | None = None
+    # Comparisons the rule did not make, by kind (RC-12 only, spec 12.4). A rule that left any
+    # unmade is never PASS, even with no discrepancies.
+    not_evaluated: Mapping[str, int] | None = None
+
+    @property
+    def complete(self) -> bool:
+        return not any((self.not_evaluated or {}).values())
+
+    @property
+    def result(self) -> str:
+        """``FAIL`` with any discrepancy; else ``INCOMPLETE`` if comparisons were left unmade."""
+        if self.discrepancies:
+            return "FAIL"
+        return "PASS" if self.complete else "INCOMPLETE"
 
     @property
     def passed(self) -> bool:
-        return self.discrepancies == 0
+        return self.result == "PASS"
 
     @property
     def title(self) -> str:
@@ -195,7 +247,12 @@ class ReconciliationResult:
 
     @property
     def failed_rules(self) -> tuple[ReconciliationRule, ...]:
-        return tuple(result.rule for result in self.rules if not result.passed)
+        return tuple(result.rule for result in self.rules if result.result == "FAIL")
+
+    @property
+    def incomplete_rules(self) -> tuple[ReconciliationRule, ...]:
+        """Rules, failed or not, that left comparisons unmade (spec 12.4)."""
+        return tuple(result.rule for result in self.rules if not result.complete)
 
 
 class ReconciliationNotFinalizedError(Exception):
@@ -253,8 +310,9 @@ def reconcile_run(run_id: str, *, evidence_root: Path | None = None) -> Reconcil
     """Reconcile a ``LOADED`` run against its archived source.
 
     Raises :class:`ReconciliationRefusedError`, writing nothing, if the run is not ready, an
-    archived source file no longer matches its recorded checksum, or the database differs from
-    the checksum recorded when it was loaded. Otherwise writes ``reports/reconciliation.json``
+    archived source file no longer matches its recorded checksum, the database differs from
+    the checksum recorded when it was loaded, or the run lacks verified row-level record reports
+    (manifest version below 3, for example). Otherwise writes ``reports/reconciliation.json``
     and marks the run ``RECONCILED`` (every rule passed) or ``FAILED`` at stage
     ``reconciliation``. Never writes to the database, reloads, releases, or declines.
 
@@ -294,6 +352,12 @@ def reconcile_run(run_id: str, *, evidence_root: Path | None = None) -> Reconcil
     archive = directory / runs.SOURCE_DIRECTORY
     if problems := _precondition_problems(archive, manifest, database):
         raise ReconciliationRefusedError(run_id, problems)
+    try:
+        recorded = read_recorded_reports(directory, manifest)
+    except (OSError, RecordedReportsError) as error:
+        raise ReconciliationRefusedError(
+            run_id, getattr(error, "problems", None) or [f"The record reports cannot be read: {error}"]
+        ) from error
 
     if not retrying and report_path.exists():
         _conflict(evidence, report_path, [
@@ -302,8 +366,10 @@ def reconcile_run(run_id: str, *, evidence_root: Path | None = None) -> Reconcil
 
     try:
         source = read_archive(archive)
-        basis = plan_conversion(archive)
-    except (OSError, ValueError, SourceValidationError) as error:
+        expected = evaluate_source(
+            {name: [line.raw for line in source[name]] for name in contract.DATA_FILES}
+        )
+    except (OSError, ValueError) as error:
         raise ReconciliationRefusedError(
             run_id, [f"The archived source cannot be read: {type(error).__name__}: {error}"]
         ) from error
@@ -313,11 +379,11 @@ def reconcile_run(run_id: str, *, evidence_root: Path | None = None) -> Reconcil
             run_id, ["The conversion database changed while it was being reconciled."]
         )
 
-    comparison = _Comparison(source, basis, target, manifest)
+    comparison = _Comparison(source, expected, recorded, target, manifest)
     comparison.run()
     rules = comparison.rule_results()
-    discrepancies = tuple(comparison.found)
-    passed = not discrepancies
+    discrepancies = tuple(_sorted(comparison.found))
+    passed = not discrepancies and all(result.complete for result in rules)
 
     if retrying and report_path.exists():
         attempt = record.get("attempt")
@@ -345,8 +411,10 @@ def reconcile_run(run_id: str, *, evidence_root: Path | None = None) -> Reconcil
                 evidence.reconciliation_abandoned(before)
             raise
 
-    failed = [result.rule for result in rules if not result.passed]
+    failed = [result.rule for result in rules if result.result == "FAIL"]
+    incomplete = [result.rule for result in rules if not result.complete]
     summary = {
+        "report_version": REPORT_VERSION,
         "result": "passed" if passed else "failed",
         "attempt": attempt,
         "report": _REPORT_RELATIVE,
@@ -354,7 +422,9 @@ def reconcile_run(run_id: str, *, evidence_root: Path | None = None) -> Reconcil
         "reconciled_at": report["generated_at"],
         "database_sha256": recorded_sha,
         "rules_failed": failed,
+        "rules_incomplete": incomplete,
         "discrepancies": len(discrepancies),
+        "eligibility": comparison.eligibility_summary(),
         "release_review": "awaiting_approval" if passed else "blocked",
     }
     if retrying:
@@ -362,10 +432,12 @@ def reconcile_run(run_id: str, *, evidence_root: Path | None = None) -> Reconcil
     failure = None if passed else {
         "stage": "reconciliation",
         "step": "reconcile",
-        "rule": failed[0],
+        # A wrong disposition causes the differences it produces in RC-03 to RC-10 (spec 12.1).
+        "rule": RC.RC_11 if RC.RC_11 in failed else (failed or incomplete)[0],
         "reason": (
             f"{len(discrepancies)} discrepancies in {', '.join(failed)}. "
-            f"See {_REPORT_RELATIVE}."
+            + (f"Not fully evaluated: {', '.join(incomplete)}. " if incomplete else "")
+            + f"See {_REPORT_RELATIVE}."
         ),
     }
     try:
@@ -411,6 +483,12 @@ def _verified_provisional_report(
             f"{_REPORT_RELATIVE} belongs to attempt {existing.get('attempt')}, "
             f"not {record.get('attempt')}."
         )
+    if existing.get("report_version") != REPORT_VERSION:
+        problems.append(
+            f"{_REPORT_RELATIVE} was written under report version "
+            f"{existing.get('report_version')!r}; it cannot be finalized under report version "
+            f"{REPORT_VERSION} and is never rewritten."
+        )
     expected = json.loads(json.dumps(fresh, default=str))
     if _without_timestamp(existing) != _without_timestamp(expected):
         changed = sorted(
@@ -441,7 +519,7 @@ def _build_report(
     recorded_sha: str,
     archive: Path,
 ) -> dict[str, Any]:
-    passed = not discrepancies
+    passed = not discrepancies and all(result.complete for result in rules)
     return {
         "report_version": REPORT_VERSION,
         "run_id": run_id,
@@ -453,8 +531,9 @@ def _build_report(
         "method": {
             "source": "Archived source files re-read and re-parsed independently.",
             "dispositions": (
-                "Re-validated from the archived source with the Phase 1 rules, then "
-                "cross-checked against the exclusion criteria and independent validation."
+                "Determined independently from the archived source (spec 12.3); the converter's "
+                "planner is not run. The record reports and manifest counts are compared with "
+                "that answer (RC-01, RC-10 to RC-12) and are never used as expected values."
             ),
             "expected_values": (
                 "Recomputed from raw source text with independent code tables and "
@@ -471,14 +550,20 @@ def _build_report(
             {
                 "rule": result.rule,
                 "title": result.title,
-                "result": "PASS" if result.passed else "FAIL",
+                "result": result.result,
                 "checked": result.checked,
                 "discrepancies": result.discrepancies,
+                "complete": result.complete,
+                **(
+                    {"not_evaluated": dict(result.not_evaluated)}
+                    if result.not_evaluated is not None else {}
+                ),
                 "note": result.note,
             }
             for result in rules
         ],
         **comparison.summary(),
+        "eligibility": comparison.eligibility_report(),
         "discrepancies": [d.to_json() for d in discrepancies],
         "release": "Not released. Release approval is a separate human decision.",
     }
@@ -517,6 +602,7 @@ def verify_reconciliation(run_id: str, *, evidence_root: Path | None = None) -> 
         problems.append(f"{_REPORT_RELATIVE} is not the report of the finalized attempt.")
     if report.get("result") != "PASS":
         problems.append(f"{_REPORT_RELATIVE} does not record a PASS.")
+    problems.extend(report_version_problems(report, record))
 
     recorded_sha = (manifest.get("database") or {}).get("sha256")
     if {(report.get("database") or {}).get("sha256"), record.get("database_sha256")} != {
@@ -540,6 +626,31 @@ def verify_reconciliation(run_id: str, *, evidence_root: Path | None = None) -> 
         ):
             problems.append(f"The archived {name} does not match the recorded checksums.")
     return ReconciliationCheck(run_id, tuple(problems))
+
+
+def report_version_problems(report: Mapping[str, Any], record: Mapping[str, Any]) -> list[str]:
+    """Why a passed report does not meet the rules of its own ``report_version`` (spec 12.2)."""
+    version = report.get("report_version")
+    required = report_rules(report)
+    if required is None:
+        return [f"{_REPORT_RELATIVE} has an unknown report version {version!r}."]
+    problems = []
+    if version >= 2 and record.get("report_version") != version:
+        problems.append("The manifest and the report disagree about the report version.")
+    if version == 1 and record.get("report_version", 1) != 1:
+        problems.append("The manifest and the report disagree about the report version.")
+    results: dict[Any, Any] = {}
+    items = report.get("rules")
+    for item in items if isinstance(items, list) else []:
+        rule = item.get("rule") if isinstance(item, Mapping) else None
+        # A duplicated rule cannot be trusted either way.
+        results[rule] = None if rule in results else item.get("result")
+    if any(results.get(rule) != "PASS" for rule in required):
+        problems.append(
+            f"Not every rule {required[0]} to {required[-1]} is recorded as PASS "
+            f"(report version {version})."
+        )
+    return problems
 
 
 def _precondition_problems(
@@ -794,24 +905,79 @@ def _shown(value: Any) -> str | None:
 # --- The comparison --------------------------------------------------------------------------
 
 
+_FILE_ORDER = {BORROWERS: 0, APPLICATIONS: 1, PARTIES: 2, CONTROL: 3}
+# Rule codes a ROOT_CAUSE entry may name: the line-level rules of spec sections 9 and 10.
+_LINE_RULES = frozenset(
+    [f"SV-{n:02d}" for n in range(1, 12)] + [f"MP-{n:02d}" for n in range(1, 5)]
+    + [f"RF-{n:02d}" for n in range(1, 9)] + [f"EX-{n:02d}" for n in range(1, 6)] + ["WN-01"]
+)
+_CAUSE_ENTRY = re.compile(r"([A-Z]{2}-[0-9]{2}) ([^ :;]+):([1-9][0-9]*)")
+_DISPOSITION_CHECKS = {
+    (Disposition.LOADED, Disposition.REJECTED): "wrongly_rejected",
+    (Disposition.LOADED, Disposition.EXCLUDED): "wrongly_excluded",
+    (Disposition.EXCLUDED, Disposition.LOADED): "wrongly_loaded",
+    (Disposition.REJECTED, Disposition.LOADED): "wrongly_loaded",
+    (Disposition.EXCLUDED, Disposition.REJECTED): "rejected_instead_of_excluded",
+    (Disposition.REJECTED, Disposition.EXCLUDED): "excluded_instead_of_rejected",
+}
+# Manifest validation.rows keys and the independent counts they must equal.
+_COUNT_KEYS = ("eligible", "excluded", "rejected", "excluded_dependent", "rejected_dependent")
+# RC-12's record of the row-detail comparisons it did not make (spec 12.4).
+_NOT_EVALUATED_KEYS = ("lines", "expected_rows", "recorded_rows")
+
+
+def _sorted(found: Iterable[Discrepancy]) -> list[Discrepancy]:
+    """Spec 12.5 order: rule, then file order, then line, then check (stable otherwise)."""
+    return sorted(found, key=lambda d: (
+        d.rule, _FILE_ORDER.get(d.file or "", 4), -1 if d.line is None else d.line, d.check,
+    ))
+
+
+def _cause_order(cause: Cause) -> tuple[int, int, str]:
+    return _FILE_ORDER[cause.file], cause.line, cause.rule
+
+
+def _causes_text(causes: Iterable[Cause]) -> str:
+    return "; ".join(str(c) for c in sorted(set(causes), key=_cause_order))
+
+
+def _row_text(rule: str, field: str, value: str) -> str:
+    return f"{rule} {field}={value}"
+
+
 class _Comparison:
     def __init__(
         self,
         source: Mapping[str, tuple[SourceLine, ...]],
-        basis: ConversionPlan,
+        expected: EligibilityResult,
+        recorded: RecordedReports,
         target: TargetSnapshot,
         manifest: Mapping[str, Any],
     ) -> None:
         self.source = source
-        self.basis = basis
+        self.expected = expected
+        self.recorded = recorded
         self.target = target
         self.manifest = manifest
         self.found: list[Discrepancy] = []
         self.checked: Counter[ReconciliationRule] = Counter()
         self.notes: dict[ReconciliationRule, str] = {}
-        self.dispositions: dict[str, dict[int, RowResult]] = {
-            file: {row.ref.line: row for row in basis.rows(file)} for file in contract.DATA_FILES
+        self.expected_lines: dict[tuple[str, int], ExpectedLine] = {
+            (line.file, line.line): line for line in expected.lines
         }
+        # Recorded report rows by the source line they name; rows naming none are kept apart.
+        self.recorded_rows: dict[tuple[str, int], dict[str, list[RecordedRow]]] = defaultdict(
+            lambda: defaultdict(list)
+        )
+        self.unplaced_rows: list[RecordedRow] = []
+        for row in recorded.all_rows():
+            if (row.file, row.line) in self.expected_lines:
+                self.recorded_rows[(row.file, row.line)][row.kind].append(row)
+            else:
+                self.unplaced_rows.append(row)
+        self.disposition_discrepancies: set[tuple[str, int]] = set()
+        # RC-12 row-detail comparisons left unmade because RC-11 disputes the line's disposition.
+        self.not_evaluated: Counter[str] = Counter({key: 0 for key in _NOT_EVALUATED_KEYS})
 
         self.borrowers = [b for b in target.borrowers if b.source_system == _SOURCE_SYSTEM]
         self.applications = [a for a in target.applications if a.source_system == _SOURCE_SYSTEM]
@@ -825,9 +991,16 @@ class _Comparison:
             self.applications_by_key[application.source_system_id].append(application)
         self.parties_by_application: dict[Any, list[TargetParty]] = defaultdict(list)
         self.parties_by_borrower: dict[Any, list[TargetParty]] = defaultdict(list)
+        # LEGACY_LOS parties by the (APPL_NO, CUST_NO) source keys of their two ends.
+        self.parties_by_pair: dict[tuple[Any, Any], list[TargetParty]] = defaultdict(list)
         for party in target.parties:
             self.parties_by_application[party.application_id].append(party)
             self.parties_by_borrower[party.borrower_id].append(party)
+            application = self.application_by_id.get(party.application_id)
+            borrower = self.borrower_by_id.get(party.borrower_id)
+            if application is not None and borrower is not None:
+                pair = (application.source_system_id, borrower.source_system_id)
+                self.parties_by_pair[pair].append(party)
 
         self.expected_relationships: dict[str, list[tuple[str, str | None]]] = {}
         self.actual_relationships: dict[str, list[tuple[str, str]]] = {}
@@ -837,25 +1010,39 @@ class _Comparison:
     def add(self, rule: ReconciliationRule, check: str, message: str, **detail: Any) -> None:
         self.found.append(Discrepancy(rule, check, message, **detail))
 
-    def disposition(self, line: SourceLine) -> Disposition | None:
-        row = self.dispositions[line.file].get(line.line)
-        return None if row is None else row.disposition
+    def expected_line(self, line: SourceLine) -> ExpectedLine:
+        return self.expected_lines[(line.file, line.line)]
+
+    def disposition(self, line: SourceLine) -> Disposition:
+        """The line's independent disposition (spec 12.3), never the converter's."""
+        return self.expected_line(line).disposition
+
+    def rows_of(self, line: SourceLine, kind: str) -> list[RecordedRow]:
+        return self.recorded_rows.get((line.file, line.line), {}).get(kind, [])
+
+    def recorded_disposition(self, line: SourceLine) -> Disposition | None:
+        """The disposition the record reports give the line; None if they give two (spec 12.4)."""
+        rejected, excluded = self.rows_of(line, EXCEPTIONS), self.rows_of(line, EXCLUSIONS)
+        if rejected and excluded:
+            return None
+        if rejected:
+            return Disposition.REJECTED
+        return Disposition.EXCLUDED if excluded else Disposition.LOADED
 
     def loaded(self, file: str) -> list[SourceLine]:
         return [
             line for line in self.source[file]
-            if self.disposition(line) is Disposition.ELIGIBLE and line.values is not None
+            if self.disposition(line) is Disposition.LOADED and line.values is not None
         ]
 
     def lines_with(self, file: str, field: str, value: str) -> list[SourceLine]:
         return [line for line in self.source[file] if line.get(field) == value]
 
     def describe(self, line: SourceLine) -> str:
-        row = self.dispositions[line.file].get(line.line)
-        if row is None:
-            return f"{line.file}:{line.line} has no disposition"
-        rules = ", ".join(row.rules)
-        return f"{line.file}:{line.line} is {row.outcome}" + (f" ({rules})" if rules else "")
+        expected = self.expected_line(line)
+        state = f"{expected.disposition}" + (", dependent" if expected.dependent else "")
+        rules = ", ".join(sorted(expected.rules))
+        return f"{line.file}:{line.line} is {state}" + (f" ({rules})" if rules else "")
 
     def run(self) -> None:
         self.rc01_accounting()
@@ -868,12 +1055,21 @@ class _Comparison:
         self.rc08_relationships()
         self.rc09_primary()
         self.rc10_standalone()
+        self.rc11_dispositions()
+        self.rc12_report_rows()
 
     def rule_results(self) -> tuple[RuleResult, ...]:
         found = Counter(d.rule for d in self.found)
         return tuple(
-            RuleResult(rule, self.checked[rule], found[rule], self.notes.get(rule)) for rule in RC
+            RuleResult(
+                rule, self.checked[rule], found[rule], self.notes.get(rule),
+                self.not_evaluated_counts() if rule is RC.RC_12 else None,
+            )
+            for rule in RC
         )
+
+    def not_evaluated_counts(self) -> dict[str, int]:
+        return {key: self.not_evaluated[key] for key in _NOT_EVALUATED_KEYS}
 
     # RC-01.
 
@@ -893,88 +1089,106 @@ class _Comparison:
         found = set()
         if line.get("REL_CD") == "SGN":
             found.add("EX-04")
-        heads = self.lines_with(APPLICATIONS, "APPL_NO", line.get("APPL_NO"))
-        if heads and all(self._exclusions(head) for head in heads):
+        appl_no = line.get("APPL_NO")
+        heads = self.lines_with(APPLICATIONS, "APPL_NO", appl_no) if appl_no.strip() else []
+        # Two copies of the application are SV-09 rejections, never exclusions (spec 12.3.2).
+        if len(heads) == 1 and self._exclusions(heads[0]):
             found.add("EX-05")
         return found
 
+    def recorded_rules(self, line: SourceLine) -> set[str]:
+        return {row.rule for kind in (EXCEPTIONS, EXCLUSIONS) for row in self.rows_of(line, kind)}
+
     def rc01_accounting(self) -> None:
+        validation = (self.manifest.get("validation") or {}).get("rows")
         for file in contract.DATA_FILES:
             lines = self.source[file]
-            rows = self.basis.rows(file)
             self.checked[RC.RC_01] += len(lines)
-            if [r.ref.line for r in rows] != [line.line for line in lines]:
+            counts = validation.get(file) if isinstance(validation, Mapping) else None
+            if not isinstance(counts, Mapping):
                 self.add(
-                    RC.RC_01, "rows_not_accounted",
-                    f"{file}: {len(lines)} rows were read but {len(rows)} were dispositioned.",
-                    file=file, expected=str(len(lines)), actual=str(len(rows)),
+                    RC.RC_01, "no_disposition",
+                    f"The manifest records no dispositions for {file}.",
+                    file=file, evidence=runs.MANIFEST_NAME, expected=str(len(lines)), actual=None,
                 )
-            counts = Counter(row.disposition for row in rows)
-            if sum(counts.values()) != len(lines):
-                self.add(
-                    RC.RC_01, "disposition_total",
-                    f"{file}: loaded + excluded + rejected is not the number of rows read.",
-                    file=file, expected=str(len(lines)), actual=str(sum(counts.values())),
-                )
+            else:
+                if counts.get("read") != len(lines):
+                    self.add(
+                        RC.RC_01, "rows_not_accounted",
+                        f"{file}: {len(lines)} rows were read, but the manifest records "
+                        f"{counts.get('read')}.",
+                        file=file, evidence=runs.MANIFEST_NAME, expected=str(len(lines)),
+                        actual=_shown(counts.get("read")),
+                    )
+                parts = [counts.get(key) for key in ("eligible", "excluded", "rejected")]
+                total = sum(parts) if all(type(p) is int for p in parts) else None
+                if total != len(lines):
+                    self.add(
+                        RC.RC_01, "disposition_total",
+                        f"{file}: the recorded loaded + excluded + rejected is not the number "
+                        "of rows read.",
+                        file=file, evidence=runs.MANIFEST_NAME, expected=str(len(lines)),
+                        actual=_shown(total),
+                    )
             for line in lines:
-                row = self.dispositions[file].get(line.line)
-                if row is None:
-                    self.add(
-                        RC.RC_01, "no_disposition", "The source row has no disposition.",
-                        file=file, line=line.line,
-                    )
-                    continue
-                if line.values is None:
-                    continue
-                key = self._key(line)
-                if row.key != key:
-                    self.add(
-                        RC.RC_01, "key_mismatch",
-                        "The accounting basis names this row by a different key.",
-                        file=file, line=line.line, source_key=key, expected=key, actual=row.key,
-                    )
+                key = self.expected_line(line).key
+                for kind in (EXCEPTIONS, EXCLUSIONS, WARNINGS):
+                    for row in self.rows_of(line, kind):
+                        if row.values["SOURCE_KEY"] != key:
+                            self.add(
+                                RC.RC_01, "key_mismatch",
+                                "The record report names this line by a different key.",
+                                file=file, line=line.line, source_key=key,
+                                evidence=row.evidence, field="SOURCE_KEY", expected=key,
+                                actual=row.values["SOURCE_KEY"],
+                            )
+                recorded = self.recorded_disposition(line)
+                if line.values is None or recorded is None:
+                    continue  # SV-01 lines meet no criterion; RC-11 reports recorded_twice.
+                rules = self.recorded_rules(line)
                 criteria = self._exclusions(line)
-                if row.disposition is Disposition.EXCLUDED and not criteria & set(row.rules):
+                if recorded is Disposition.EXCLUDED and not criteria & rules:
                     self.add(
                         RC.RC_01, "exclusion_without_criterion",
                         "The row is excluded, but its source text meets none of the exclusion "
                         "criteria recorded for it.",
                         file=file, line=line.line, source_key=key,
                         expected=", ".join(sorted(criteria)) or "not excluded",
-                        actual=", ".join(row.rules),
+                        actual=", ".join(sorted(rules)),
                     )
-                if row.disposition is Disposition.ELIGIBLE and criteria:
+                if recorded is Disposition.LOADED and criteria:
                     self.add(
                         RC.RC_01, "loaded_despite_exclusion",
-                        "The row is marked to load, but it meets an exclusion criterion.",
+                        "The row is recorded as loaded, but it meets an exclusion criterion.",
                         file=file, line=line.line, source_key=key,
                         expected=", ".join(sorted(criteria)), actual="loaded",
                     )
                 if (
-                    row.disposition is Disposition.REJECTED
+                    recorded is Disposition.REJECTED
                     and criteria
-                    and not _REJECTED_BEFORE_EXCLUSION & set(row.rules)
+                    and not _REJECTED_BEFORE_EXCLUSION & rules
                 ):
                     self.add(
                         RC.RC_01, "rejected_despite_exclusion",
                         "The row is rejected, but it meets an exclusion criterion, and only "
                         "SV-01, SV-09, or SV-10 are applied before exclusions.",
                         file=file, line=line.line, source_key=key,
-                        expected=", ".join(sorted(criteria)), actual=", ".join(row.rules),
+                        expected=", ".join(sorted(criteria)), actual=", ".join(sorted(rules)),
                     )
 
         expected = self.manifest.get("expected_target") or {}
         for name, file in (
             ("borrowers", BORROWERS), ("applications", APPLICATIONS), ("parties", PARTIES)
         ):
-            loaded = sum(1 for row in self.basis.rows(file) if row.disposition is Disposition.ELIGIBLE)
+            loaded = self.expected.counts(file)[Disposition.LOADED]
             self.checked[RC.RC_01] += 1
             if expected.get(name) != loaded:
                 self.add(
                     RC.RC_01, "load_plan_count",
-                    f"The load expected {expected.get(name)} {name}, but re-validating the "
-                    f"archived source gives {loaded}.",
-                    file=file, expected=str(loaded), actual=_shown(expected.get(name)),
+                    f"The load expected {expected.get(name)} {name}, but the independent "
+                    f"determination from the archived source gives {loaded}.",
+                    file=file, evidence=runs.MANIFEST_NAME, expected=str(loaded),
+                    actual=_shown(expected.get(name)),
                 )
 
     @staticmethod
@@ -1171,7 +1385,7 @@ class _Comparison:
             else:
                 target_amounts.append(value)
         self.target_total = _exact_sum(target_amounts)
-        loaded = self.amounts[Disposition.ELIGIBLE]
+        loaded = self.amounts[Disposition.LOADED]
 
         self.checked[RC.RC_05] += 3
         if loaded != self.target_total:
@@ -1333,7 +1547,7 @@ class _Comparison:
                 if disposition is Disposition.EXCLUDED or line.values is None:
                     continue
                 self.checked[RC.RC_08] += 1
-                if disposition is not Disposition.ELIGIBLE:
+                if disposition is not Disposition.LOADED:
                     self.add(
                         RC.RC_08, "rejected_relationship_on_loaded_application",
                         "A required relationship of a loaded application was not loaded "
@@ -1466,22 +1680,30 @@ class _Comparison:
     # RC-10.
 
     def rc10_standalone(self) -> None:
-        warned = {row.key for row in self.basis.customers_without_applications}
-        related = {line.get("CUST_NO") for line in self.loaded(PARTIES)}
-        independent = {line.get("CUST_NO") for line in self.loaded(BORROWERS)} - related
+        # Expected: the independent WN-01 set (spec 12.3.5). Recorded: warnings.csv.
+        warned = {line.key for line in self.expected.warnings}
+        listed: dict[str, RecordedRow] = {}
+        for row in self.recorded.rows[WARNINGS]:
+            named = self.expected_lines.get((row.file, row.line)) if row.file == BORROWERS else None
+            if row.rule == "WN-01" and named is not None:
+                listed.setdefault(named.key, row)
         target = {
             b.source_system_id: b for b in self.borrowers if not self.parties_by_borrower.get(b.id)
         }
         self.standalone = sorted(warned)
 
-        for cust in sorted(warned ^ independent):
+        for cust in sorted(warned ^ set(listed)):
             self.checked[RC.RC_10] += 1
             self.add(
                 RC.RC_10, "warning_list_mismatch",
-                "The WN-01 list does not match the loaded customers with no loaded relationship.",
+                "The WN-01 list in warnings.csv does not match the independently determined "
+                "customers with no loaded relationship.",
                 file=BORROWERS, source_key=cust,
-                expected="listed" if cust in independent else "not listed",
-                actual="listed" if cust in warned else "not listed",
+                evidence=listed[cust].evidence if cust in listed else (
+                    recorded_evidence.report_path(WARNINGS)
+                ),
+                expected="listed" if cust in warned else "not listed",
+                actual="listed" if cust in listed else "not listed",
             )
         borrowers_by_key = {line.get("CUST_NO"): line for line in self.loaded(BORROWERS)}
         for cust in sorted(warned | set(target), key=str):
@@ -1510,15 +1732,369 @@ class _Comparison:
                     expected="listed relationships", actual="0 relationships",
                 )
 
+    # RC-11.
+
+    def _target_records(self, line: SourceLine) -> list[Any]:
+        """Target records carrying the line's key (spec 12.3.1); none for an SV-01 line."""
+        if line.values is None:
+            return []
+        if line.file == BORROWERS:
+            return list(self.borrowers_by_key.get(line.get("CUST_NO"), []))
+        if line.file == APPLICATIONS:
+            return list(self.applications_by_key.get(line.get("APPL_NO"), []))
+        return list(self.parties_by_pair.get((line.get("APPL_NO"), line.get("CUST_NO")), []))
+
+    def independent_counts(self, file: str) -> dict[str, int]:
+        lines = self.expected.file_lines(file)
+        counts = self.expected.counts(file)
+        return {
+            "eligible": counts[Disposition.LOADED],
+            "excluded": counts[Disposition.EXCLUDED],
+            "rejected": counts[Disposition.REJECTED],
+            "excluded_dependent": sum(
+                1 for line in lines if line.dependent and line.disposition is Disposition.EXCLUDED
+            ),
+            "rejected_dependent": sum(
+                1 for line in lines if line.dependent and line.disposition is Disposition.REJECTED
+            ),
+        }
+
+    def rc11_dispositions(self) -> None:
+        for row in self.unplaced_rows:
+            self.checked[RC.RC_11] += 1
+            self.add(
+                RC.RC_11, "report_row_without_source_line",
+                f"A {row.kind}.csv row names {row.file}:{row.values['LINE_NO']}, which is not a "
+                "data line of the archived source.",
+                file=row.file, line=row.line, evidence=row.evidence, field="disposition",
+                expected=None, actual=f"{row.file}:{row.values['LINE_NO']}",
+            )
+
+        for file in contract.DATA_FILES:
+            for line in self.source[file]:
+                expected = self.expected_line(line)
+                where = f"{file}:{line.line}"
+                detail = {
+                    "file": file, "line": line.line, "source_key": expected.key,
+                    "unit_key": expected.unit_key or None,
+                }
+                self.checked[RC.RC_11] += 2
+                recorded = self.recorded_disposition(line)
+                if recorded is None:
+                    self.disposition_discrepancies.add((file, line.line))
+                    self.add(
+                        RC.RC_11, "recorded_twice",
+                        f"{where} has rows in both exceptions.csv and exclusions.csv; it is "
+                        f"{expected.disposition} by the independent determination.",
+                        evidence=self.rows_of(line, EXCEPTIONS)[0].evidence, field="disposition",
+                        expected=str(expected.disposition), actual="rejected and excluded",
+                        **detail,
+                    )
+                elif recorded is not expected.disposition:
+                    self.disposition_discrepancies.add((file, line.line))
+                    self._disposition_mismatch(line, expected, recorded, detail)
+
+                records = self._target_records(line)
+                table = _TABLES[file]
+                if expected.disposition is Disposition.LOADED and not records:
+                    self.add(
+                        RC.RC_11, "missing_from_target",
+                        f"{where} loads by the independent determination, but {table} has no "
+                        "record for it.",
+                        target_table=table, field="target_record", expected="present",
+                        actual="absent", **detail,
+                    )
+                elif expected.disposition is not Disposition.LOADED and records:
+                    self.add(
+                        RC.RC_11, "unexpected_in_target",
+                        f"{where} is {expected.disposition} by the independent determination, "
+                        f"but {table} holds a record with its key.",
+                        target_table=table, target_id=records[0].id, field="target_record",
+                        expected="absent", actual="present", **detail,
+                    )
+
+        validation = (self.manifest.get("validation") or {}).get("rows")
+        for file in contract.DATA_FILES:
+            independent = self.independent_counts(file)
+            counts = validation.get(file) if isinstance(validation, Mapping) else None
+            for key in _COUNT_KEYS:
+                self.checked[RC.RC_11] += 1
+                actual = counts.get(key) if isinstance(counts, Mapping) else None
+                if actual != independent[key]:
+                    label = key.replace("eligible", "loaded")
+                    self.add(
+                        RC.RC_11, "disposition_count",
+                        f"{file}: the manifest records {actual} {label} rows; the independent "
+                        f"determination gives {independent[key]}.",
+                        file=file, evidence=runs.MANIFEST_NAME, field="disposition",
+                        expected=f"{label}={independent[key]}", actual=f"{label}={actual}",
+                    )
+
+    def _disposition_mismatch(
+        self,
+        line: SourceLine,
+        expected: ExpectedLine,
+        recorded: Disposition,
+        detail: Mapping[str, Any],
+    ) -> None:
+        def with_rules(state: str, rules: Iterable[str]) -> str:
+            shown = ", ".join(sorted(rules))
+            return f"{state} ({shown})" if shown else state
+
+        if recorded is Disposition.LOADED:
+            kind = EXCEPTIONS if expected.disposition is Disposition.REJECTED else EXCLUSIONS
+            evidence = recorded_evidence.report_path(kind)
+        else:
+            kind = EXCEPTIONS if recorded is Disposition.REJECTED else EXCLUSIONS
+            evidence = self.rows_of(line, kind)[0].evidence
+        self.add(
+            RC.RC_11, _DISPOSITION_CHECKS[(expected.disposition, recorded)],
+            f"{line.file}:{line.line} is "
+            f"{with_rules(str(expected.disposition), expected.rules)} by the independent "
+            f"determination, but the record reports show it "
+            f"{with_rules(str(recorded), self.recorded_rules(line))}.",
+            evidence=evidence, field="disposition", expected=str(expected.disposition),
+            actual=str(recorded), **detail,
+        )
+
+    # RC-12.
+
+    def rc12_report_rows(self) -> None:
+        for file in contract.DATA_FILES:
+            for line in self.source[file]:
+                expected = self.expected_line(line)
+                if (file, line.line) in self.disposition_discrepancies:
+                    # RC-11 already reports the wrong disposition; comparing rows written for
+                    # it would only restate that difference.
+                    self.not_evaluated["lines"] += 1
+                    self.not_evaluated["expected_rows"] += len(expected.report_rows)
+                    self.not_evaluated["recorded_rows"] += len(
+                        self.rows_of(line, EXCEPTIONS) + self.rows_of(line, EXCLUSIONS)
+                    )
+                elif expected.disposition is not Disposition.LOADED:
+                    kind = (
+                        EXCEPTIONS if expected.disposition is Disposition.REJECTED else EXCLUSIONS
+                    )
+                    self._compare_rows(
+                        line, expected, kind, expected.report_rows, expected.causes,
+                        self.rows_of(line, kind),
+                    )
+                warnings = self.rows_of(line, WARNINGS)
+                if expected.warning is not None or warnings:
+                    wanted = (ReportRow("WN-01", "", ""),) if expected.warning is not None else ()
+                    self._compare_rows(
+                        line, expected, WARNINGS, wanted,
+                        {"WN-01": expected.warning or frozenset()}, warnings,
+                    )
+        skipped = self.not_evaluated
+        if skipped["lines"]:
+            self.notes[RC.RC_12] = (
+                f"Incomplete: exception and exclusion row details of {skipped['lines']} lines "
+                f"were not compared ({skipped['expected_rows']} expected rows, "
+                f"{skipped['recorded_rows']} recorded rows), because RC-11 found their "
+                "dispositions wrong. Those details are unexamined, not verified; their "
+                "warnings were still compared."
+            )
+
+    def _parse_causes(self, text: str) -> frozenset[Cause] | None:
+        """A ROOT_CAUSE value parsed strictly (spec 12.4); None if it cannot be."""
+        if text == "":
+            return frozenset()
+        causes = set()
+        for entry in text.split("; "):
+            match = _CAUSE_ENTRY.fullmatch(entry)
+            if (
+                match is None
+                or match[1] not in _LINE_RULES
+                or (match[2], int(match[3])) not in self.expected_lines
+            ):
+                return None
+            causes.add(Cause(match[1], match[2], int(match[3])))
+        return frozenset(causes)
+
+    def _compare_rows(
+        self,
+        line: SourceLine,
+        expected: ExpectedLine,
+        kind: str,
+        wanted: Iterable[ReportRow],
+        causes: Mapping[str, frozenset[Cause]],
+        rows: list[RecordedRow],
+    ) -> None:
+        """Match one line's recorded rows of one report to its expected rows (spec 12.4)."""
+        warning = kind == WARNINGS
+
+        def check(name: str) -> str:
+            if not warning:
+                return name
+            return {
+                "missing_rule": "missing_warning", "missing_row": "missing_warning",
+                "unexpected_rule": "unexpected_warning", "unexpected_row": "unexpected_warning",
+                "root_cause_mismatch": "warning_cause_mismatch",
+            }.get(name, name)
+
+        where = f"{line.file}:{line.line}"
+        detail = {
+            "file": line.file, "line": line.line, "source_key": expected.key,
+            "unit_key": expected.unit_key or None,
+        }
+        wanted = list(wanted)
+        open_rows = list(rows)
+        matched: list[tuple[ReportRow, RecordedRow]] = []
+        remaining: list[ReportRow] = []
+        for want in wanted:
+            hit = next((
+                row for row in open_rows
+                if (row.rule, row.values["FIELD"], row.values["SOURCE_VALUE"])
+                == (want.rule, want.field, want.source_value)
+            ), None)
+            if hit is None:
+                remaining.append(want)
+            else:
+                open_rows.remove(hit)
+                matched.append((want, hit))
+        for want in list(remaining):
+            same_wanted = [w for w in remaining if (w.rule, w.field) == (want.rule, want.field)]
+            same_recorded = [
+                row for row in open_rows if (row.rule, row.values["FIELD"]) == (want.rule, want.field)
+            ]
+            if len(same_wanted) == 1 and len(same_recorded) == 1:
+                [got] = same_recorded
+                remaining.remove(want)
+                open_rows.remove(got)
+                matched.append((want, got))
+                self.add(
+                    RC.RC_12, "source_value_mismatch",
+                    f"{where}: the {want.rule} row for {want.field or 'the line'} records a "
+                    "different SOURCE_VALUE.",
+                    evidence=got.evidence, field="SOURCE_VALUE", expected=want.source_value,
+                    actual=got.values["SOURCE_VALUE"], **detail,
+                )
+        for want in remaining:
+            text = _row_text(want.rule, want.field, want.source_value)
+            name = "missing_row" if any(row.rule == want.rule for row in rows) else "missing_rule"
+            self.add(
+                RC.RC_12, check(name), f"{where}: {kind}.csv has no row {text}.",
+                evidence=recorded_evidence.report_path(kind), field="RULE_CODE", expected=text,
+                actual="none", **detail,
+            )
+        expected_rules = {w.rule for w in wanted}
+        for got in open_rows:
+            text = _row_text(got.rule, got.values["FIELD"], got.values["SOURCE_VALUE"])
+            name = "unexpected_row" if got.rule in expected_rules else "unexpected_rule"
+            self.add(
+                RC.RC_12, check(name), f"{where}: {kind}.csv records {text}, which is not expected.",
+                evidence=got.evidence, field="RULE_CODE", expected="none", actual=text, **detail,
+            )
+
+        dependent = "Y" if expected.dependent and not warning else "N"
+        unit_key = "" if warning else expected.unit_key
+        for got in rows:
+            self.checked[RC.RC_12] += 1
+            values = got.values
+            for column, check_name, want_value in (
+                ("DEPENDENT", "dependent_mismatch", dependent),
+                ("UNIT_KEY", "unit_key_mismatch", unit_key),
+                ("STAGE", "stage_mismatch",
+                 STAGES[got.rule[:2]] if got.rule in _LINE_RULES else values["STAGE"]),
+                ("SOURCE_LINE", "source_line_mismatch", line.raw),
+            ):
+                if values[column] != want_value:
+                    self.add(
+                        RC.RC_12, check_name,
+                        f"{where}: the {got.rule} row records a different {column}.",
+                        evidence=got.evidence, field=column, expected=want_value,
+                        actual=values[column], **detail,
+                    )
+            if self._parse_causes(values["ROOT_CAUSE"]) is None:
+                self.add(
+                    RC.RC_12, "root_cause_unreadable",
+                    f"{where}: the {got.rule} row's ROOT_CAUSE cannot be parsed.",
+                    evidence=got.evidence, field="ROOT_CAUSE", expected=None,
+                    actual=values["ROOT_CAUSE"], **detail,
+                )
+        for want, got in matched:
+            parsed = self._parse_causes(got.values["ROOT_CAUSE"])
+            wanted_causes = causes.get(want.rule, frozenset())
+            if parsed is not None and parsed != wanted_causes:
+                self.add(
+                    RC.RC_12, check("root_cause_mismatch"),
+                    f"{where}: the {want.rule} row names different immediate causes.",
+                    evidence=got.evidence, field="ROOT_CAUSE",
+                    expected=_causes_text(wanted_causes), actual=got.values["ROOT_CAUSE"],
+                    **detail,
+                )
+
     # Report.
+
+    def eligibility_report(self) -> dict[str, Any]:
+        """The independently verified eligibility section of the report (version 2)."""
+        files = {}
+        for file in contract.DATA_FILES:
+            recorded: Counter[str] = Counter()
+            for line in self.source[file]:
+                disposition = self.recorded_disposition(line)
+                recorded[str(disposition or "recorded_twice")] += 1
+                rows = [*self.rows_of(line, EXCEPTIONS), *self.rows_of(line, EXCLUSIONS)]
+                if disposition is not None and any(r.values["DEPENDENT"] == "Y" for r in rows):
+                    recorded[f"{disposition}_dependent"] += 1
+            files[file] = {
+                "read": len(self.source[file]),
+                "independent": {
+                    key.replace("eligible", "loaded"): value
+                    for key, value in self.independent_counts(file).items()
+                },
+                "recorded": {
+                    name: recorded[name]
+                    for name in (
+                        "loaded", "excluded", "rejected", "excluded_dependent",
+                        "rejected_dependent", "recorded_twice",
+                    )
+                },
+            }
+        return {
+            "determination": (
+                "Independent, from the archived source alone (spec 12.3); the converter's "
+                "decisions and record reports are compared with it, never used as expected values."
+            ),
+            "files": files,
+            "lines_compared": sum(len(self.source[file]) for file in contract.DATA_FILES),
+            "disposition_discrepancies": len(self.disposition_discrepancies),
+            "row_details": "complete" if not self.not_evaluated["lines"] else "incomplete",
+            "not_evaluated_by_rc12": self.not_evaluated_counts(),
+            "warnings": sorted(line.key for line in self.expected.warnings),
+        }
+
+    def eligibility_summary(self) -> dict[str, Any]:
+        """The manifest's compact copy of :meth:`eligibility_report`.
+
+        ``independently_verified`` is true only when RC-11 and RC-12 both passed with every
+        comparison made: the converter's eligibility then agrees with the independent one.
+        """
+        found = Counter(d.rule for d in self.found)
+        complete = not self.not_evaluated["lines"]
+        return {
+            "expected_from": "independent determination (spec 12.3)",
+            "independently_verified": not found[RC.RC_11] and not found[RC.RC_12] and complete,
+            "row_details": "complete" if complete else "incomplete",
+            "not_evaluated_by_rc12": self.not_evaluated_counts(),
+            "lines_compared": sum(len(self.source[file]) for file in contract.DATA_FILES),
+            "loaded": {
+                file: self.expected.counts(file)[Disposition.LOADED]
+                for file in contract.DATA_FILES
+            },
+            "disposition_discrepancies": len(self.disposition_discrepancies),
+            "rc11_discrepancies": found[RC.RC_11],
+            "rc12_discrepancies": found[RC.RC_12],
+        }
 
     def summary(self) -> dict[str, Any]:
         rows = {}
         for file in contract.DATA_FILES:
-            counts = Counter(row.disposition for row in self.basis.rows(file))
+            counts = self.expected.counts(file)
             rows[file] = {
                 "read": len(self.source[file]),
-                "loaded": counts[Disposition.ELIGIBLE],
+                "loaded": counts[Disposition.LOADED],
                 "excluded": counts[Disposition.EXCLUDED],
                 "rejected": counts[Disposition.REJECTED],
             }
@@ -1527,13 +2103,14 @@ class _Comparison:
         for cust in self.standalone:
             relationships = []
             for line in self.lines_with(PARTIES, "CUST_NO", cust):
-                row = self.dispositions[PARTIES][line.line]
+                expected = self.expected_line(line)
                 relationships.append({
                     "line": line.line,
                     "appl_no": line.get("APPL_NO"),
                     "rel_cd": line.get("REL_CD"),
-                    "outcome": row.outcome,
-                    "rules": list(row.rules),
+                    "outcome": f"{expected.disposition}"
+                    + ("_dependent" if expected.dependent else ""),
+                    "rules": sorted(expected.rules),
                 })
             customers.append({"cust_no": cust, "relationships": relationships})
         return {
@@ -1542,7 +2119,7 @@ class _Comparison:
                 "requested_amount": {
                     "source_total": str(self.source_total),
                     "control_total": _shown(self.control_total),
-                    "loaded": str(self.amounts[Disposition.ELIGIBLE]),
+                    "loaded": str(self.amounts[Disposition.LOADED]),
                     "excluded": str(self.amounts[Disposition.EXCLUDED]),
                     "rejected": str(self.amounts[Disposition.REJECTED]),
                     "unparseable": self.unparseable,

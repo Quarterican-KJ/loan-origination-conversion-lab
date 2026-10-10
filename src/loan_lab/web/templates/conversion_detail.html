@@ -208,6 +208,7 @@
       <div><dt>Reconciled</dt><dd data-field="reconciled-at">{{ c.timestamp(rec.reconciled_at if rec else none) }}</dd></div>
       <div><dt>Discrepancies</dt><dd>{{ c.count(rec.discrepancies if rec else none) }}</dd></div>
       {% if rec and rec.rules_failed %}<div><dt>Failed rules</dt><dd>{{ rec.rules_failed | join(", ") }}</dd></div>{% endif %}
+      {% if rec and rec.rules_incomplete %}<div><dt>Not fully evaluated</dt><dd data-field="rules-incomplete">{{ rec.rules_incomplete | join(", ") }}</dd></div>{% endif %}
     </dl>
   </section>
 </div>

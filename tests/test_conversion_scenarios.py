@@ -497,8 +497,9 @@ def test_web_shows_the_defect_discrepancy(lab: Lab, client: TestClient) -> None:
     section = re.search(r'data-discrepancies="RC-07"(.*?)</article>', html, re.DOTALL).group(1)
     assert "0000500101" in section and "6.5000" in section and "6.6000" in section
     assert re.findall(r'<tr data-rule="(RC-\d\d)">.*?data-result="(\w+)"', html, re.DOTALL) == [
-        (f"RC-{n:02d}", "FAIL" if n == 7 else "PASS") for n in range(1, 11)
+        (f"RC-{n:02d}", "FAIL" if n == 7 else "PASS") for n in range(1, 13)
     ]
+    assert re.search(r'data-field="report-version">2<', html)
 
 
 def test_web_shows_the_validation_failure(lab: Lab, client: TestClient) -> None:

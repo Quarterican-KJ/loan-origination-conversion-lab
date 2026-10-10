@@ -117,6 +117,7 @@
 {% if result is none %}{{ na() }}
 {%- elif not verified %}<span class="badge result-unverified" data-result="{{ result }}-unverified">{{ result }} (unverified)</span>
 {%- elif result == "PASS" %}<span class="badge result-pass" data-result="PASS">PASS</span>
+{%- elif result == "INCOMPLETE" %}<span class="badge result-incomplete" data-result="INCOMPLETE" title="No discrepancies, but some comparisons were not made">INCOMPLETE</span>
 {%- else %}<span class="badge result-fail" data-result="FAIL">FAIL</span>
 {%- endif %}
 {%- endmacro %}

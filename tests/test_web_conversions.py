@@ -4,6 +4,7 @@ Real runs are produced with the actual converter and reconciler; edited copies o
 for incomplete, conflicting, malformed, and hostile evidence.
 """
 
+import dataclasses
 import hashlib
 import json
 import os
@@ -23,6 +24,8 @@ from fastapi.testclient import TestClient
 
 from loan_lab.conversion.legacy import reconcile_run, run_conversion
 from loan_lab.conversion.legacy import run as runs
+from loan_lab.conversion.legacy.contract import Rule
+from loan_lab.conversion.legacy.plan import Cause, Disposition, Issue
 from loan_lab.main import create_app
 from loan_lab.paths import find_project_root
 from loan_lab.web import conversions, formatting
@@ -108,6 +111,58 @@ def lab(tmp_path_factory: pytest.TempPathFactory) -> Lab:
         patch.setattr(runs, "load_plan", corrupted_load)
         _convert(lab, source, "run-mismatch")
     reconcile_run("run-mismatch", evidence_root=lab.evidence)
+
+    # The converter records borrowers.csv:12 (SV-02) as an EX-01 exclusion: RC-11 fails, and
+    # RC-12 leaves that line's row details unexamined (INCOMPLETE).
+    real_plan = runs.plan_conversion
+
+    def excluded_b12(directory: Path) -> Any:
+        plan = real_plan(directory)
+
+        def fix(row: Any) -> Any:
+            if (row.ref.file, row.ref.line) != ("borrowers.csv", 12):
+                return row
+            return dataclasses.replace(row, disposition=Disposition.EXCLUDED, issues=(
+                Issue(Rule.EX_01, "Excluded (injected).", "RECORD_STATUS", "A",
+                      (Cause(Rule.EX_01, row.ref),)),
+            ))
+
+        return dataclasses.replace(plan, borrowers=tuple(fix(r) for r in plan.borrowers))
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(runs, "plan_conversion", excluded_b12)
+        _convert(lab, source, "run-rc12-incomplete")
+    reconcile_run("run-rc12-incomplete", evidence_root=lab.evidence)
+
+    # A run reconciled under report version 1, before RC-11 and RC-12 existed.
+    clone(lab, "run-reconciled", "run-v1")
+
+    def version_1(report: dict[str, Any]) -> None:
+        report.update(report_version=1, rules=report["rules"][:10])
+        for item in report["rules"]:
+            item.pop("complete", None)
+        del report["eligibility"]
+
+    def version_1_record(manifest: dict[str, Any]) -> None:
+        record = manifest["reconciliation"]
+        for key in ("report_version", "eligibility", "rules_incomplete"):
+            del record[key]
+        record["report_sha256"] = hashlib.sha256(
+            (lab.evidence / "run-v1" / "reports" / "reconciliation.json").read_bytes()
+        ).hexdigest()
+
+    edit(lab, "run-v1", "reports/reconciliation.json", version_1)
+    edit(lab, "run-v1", "manifest.json", version_1_record)
+
+    # A LOADED run converted before row-level record reports existed (manifest version 2).
+    def before_record_reports(manifest: dict[str, Any]) -> None:
+        manifest["manifest_version"] = 2
+        del manifest["reports"]
+
+    clone(lab, "run-loaded", "run-legacy-loaded")
+    edit(lab, "run-legacy-loaded", "manifest.json", before_record_reports)
+    for name in ("exceptions.csv", "exclusions.csv", "warnings.csv"):
+        (lab.evidence / "run-legacy-loaded" / "reports" / name).unlink()
 
     invalid = root / "invalid-source"
     shutil.copytree(SAMPLE_DIR, invalid)
@@ -452,8 +507,10 @@ def test_reconciliation_page_lists_every_rule_as_pass(client: TestClient) -> Non
 
     assert response.status_code == 200
     html = response.text
-    assert rule_results(html) == {f"RC-{n:02d}": "PASS" for n in range(1, 11)}
+    assert rule_results(html) == {f"RC-{n:02d}": "PASS" for n in range(1, 13)}
     assert 'data-report="pass"' in html
+    assert "All rules RC-01 to RC-12 passed" in html
+    assert 'data-report-version="1"' not in html
     assert "No discrepancies recorded." in html
     assert cell(html, "source-total") == "$5,467,000.00"
     assert cell(html, "loaded-total") == "$2,281,000.00"
@@ -475,14 +532,105 @@ def test_reconciliation_page_shows_field_level_discrepancies(client: TestClient)
     assert cell(section, "actual") == "6.6000"
 
 
-def test_reconciliation_page_without_a_report(client: TestClient) -> None:
+def not_performed_reason(html: str) -> str:
+    match = re.search(r'data-field="not-performed-reason">(.*?)</span>', html, re.DOTALL)
+    assert match
+    return match.group(1)
+
+
+def assert_no_rule_results(html: str) -> None:
+    """No rule is presented as evaluated: no rules table, rows, results, or pass notice."""
+    assert 'id="rules"' not in html
+    assert '<tr data-rule="' not in html
+    assert "data-result=" not in html
+    assert 'data-report="pass"' not in html
+    assert "RC-01" not in html
+
+
+def test_reconciliation_page_before_reconciliation(client: TestClient) -> None:
     html = client.get("/conversions/run-loaded/reconciliation").text
 
-    assert 'data-report="unavailable"' in html
+    assert 'data-report="not-performed"' in html
+    assert "Reconciliation not yet performed." in html
+    assert 'data-report="unavailable"' not in html
     assert cell(html, "reconciliation-outcome") == "Not run"
-    assert len(re.findall(r'<tr data-rule="RC-\d\d">', html)) == 10
-    assert rule_results(html) == {}
-    assert html.count(NOT_AVAILABLE) >= 30
+    assert not_performed_reason(html) == (
+        "The run is loaded and ready. An operator reconciles it from the command line "
+        "(python -m loan_lab.conversion.legacy.reconcile_cli run-loaded); this page never "
+        "starts one."
+    )
+    assert_no_rule_results(html)
+    assert 'data-report-version="1"' not in html
+
+
+def test_reconciliation_page_for_a_run_that_failed_before_reconciliation(
+    client: TestClient,
+) -> None:
+    html = client.get("/conversions/run-invalid/reconciliation").text
+
+    assert 'data-report="not-performed"' in html
+    assert not_performed_reason(html).startswith("The run failed at stage ")
+    assert "so it is never reconciled" in not_performed_reason(html)
+    assert_no_rule_results(html)
+
+
+def test_reconciliation_page_for_a_loaded_run_without_record_reports(client: TestClient) -> None:
+    html = client.get("/conversions/run-legacy-loaded/reconciliation").text
+
+    assert 'data-report="not-performed"' in html
+    assert "predates row-level record reports (manifest version 2)" in not_performed_reason(html)
+    assert "would be refused" in not_performed_reason(html)
+    assert_no_rule_results(html)
+
+
+@pytest.mark.parametrize("run_id", ["run-no-report", "run-incomplete", "run-unknown"])
+def test_missing_report_is_not_called_not_performed_when_it_should_exist(
+    client: TestClient, run_id: str
+) -> None:
+    html = client.get(f"/conversions/{run_id}/reconciliation").text
+
+    if run_id == "run-no-report":
+        # The manifest records a final reconciliation whose report is gone: evidence problem.
+        assert 'data-report="unavailable"' in html
+        assert 'data-report="not-performed"' not in html
+    else:
+        # Not loaded (LOADING, UNKNOWN): not yet performed, and the status says why.
+        assert 'data-report="not-performed"' in html
+        assert "Only a LOADED run can be reconciled." in not_performed_reason(html)
+    assert_no_rule_results(html)
+
+
+def test_reconciliation_page_for_a_version_1_report(client: TestClient) -> None:
+    html = client.get("/conversions/run-v1/reconciliation").text
+
+    assert rule_results(html) == {f"RC-{n:02d}": "PASS" for n in range(1, 11)}
+    assert 'data-rule="RC-11"' not in html and 'data-rule="RC-12"' not in html
+    assert 'data-report="pass"' in html
+    assert "All rules RC-01 to RC-10 passed" in html
+    assert 'data-report-version="1"' in html
+    assert "reconciled before independent disposition verification" in html
+    assert '<span data-field="report-version">1</span>' in html
+    assert "data-unexamined=" not in html
+
+
+def test_reconciliation_page_for_a_version_2_report_with_incomplete_rc12(
+    client: TestClient,
+) -> None:
+    html = client.get("/conversions/run-rc12-incomplete/reconciliation").text
+
+    results = rule_results(html)
+    assert list(results) == [f"RC-{n:02d}" for n in range(1, 13)]
+    assert results["RC-11"] == "FAIL"
+    assert results["RC-12"] == "INCOMPLETE"
+    assert 'data-report="fail"' in html
+    assert 'data-report-version="1"' not in html
+    notice = re.search(r'data-unexamined="RC-12">(.*?)</div>', html, re.DOTALL).group(1)
+    assert '<span data-field="unexamined-lines">1</span>' in notice
+    assert "unexamined, not verified" in notice
+    rc12 = re.search(r'<tr data-rule="RC-12">(.*?)</tr>', html, re.DOTALL).group(1)
+    assert "Incomplete: exception and exclusion row details of 1 lines" in rc12
+    summary = client.get("/conversions/run-rc12-incomplete").text
+    assert cell(summary, "rules-incomplete") == "RC-12"
 
 
 @pytest.mark.parametrize("run_id", ["run-tampered-report", "run-unfinalized"])

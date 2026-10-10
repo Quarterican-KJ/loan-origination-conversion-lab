@@ -757,6 +757,69 @@ def test_rejected_primary_explains_missing_primary(tmp_path: Path) -> None:
     assert [str(c) for c in guarantor.root_causes] == ["SV-03 application_parties.csv:2"]
 
 
+def causes_by_rule(plan: ConversionPlan, file: str, line: int = 2) -> dict[str, list[str]]:
+    return {
+        str(issue.rule): sorted(str(c) for c in issue.causes)
+        for issue in result(plan, file, line).issues
+    }
+
+
+def test_rf06_names_the_rejected_primary_not_a_rejected_guarantor(tmp_path: Path) -> None:
+    plan = plan_for(tmp_path, parties=(party(cust="1"), party(cust="00000099", role="GTR")))
+
+    assert causes_by_rule(plan, APPLICATIONS) == {
+        "RF-07": ["RF-02 application_parties.csv:3", "SV-03 application_parties.csv:2"],
+        "RF-06": ["SV-03 application_parties.csv:2"],
+    }
+
+
+def test_rf06_excludes_rf08_for_conflicting_rejected_primaries(tmp_path: Path) -> None:
+    plan = plan_for(
+        tmp_path,
+        parties=(party(cust="00000098"), party(cust="00000099"), party(cust="00000002", role="GTR")),
+    )
+
+    both = ["RF-02 application_parties.csv:2", "RF-02 application_parties.csv:3"]
+    assert causes_by_rule(plan, APPLICATIONS) == {
+        "RF-07": both,
+        "RF-08": ["RF-08 applications.csv:2"],
+        "RF-06": both,
+    }
+    assert causes_by_rule(plan, PARTIES, 4) == {"RF-05": [*both, "RF-08 applications.csv:2"]}
+
+
+def test_rf06_without_a_primary_row_names_the_application_line(tmp_path: Path) -> None:
+    plan = plan_for(tmp_path, parties=(party(role="COB"), party(cust="00000099", role="GTR")))
+
+    assert causes_by_rule(plan, APPLICATIONS) == {
+        "RF-07": ["RF-02 application_parties.csv:3"],
+        "RF-06": ["RF-06 applications.csv:2"],
+    }
+
+
+@pytest.mark.parametrize(
+    ("kind", "type_failure"),
+    [("X", ("SV-07", "CUST_TYPE", "X")), ("", ("SV-02", "CUST_TYPE", ""))],
+    ids=["unknown", "blank"],
+)
+def test_middle_initial_is_checked_whatever_the_customer_type(
+    tmp_path: Path, kind: str, type_failure: tuple[str, str, str]
+) -> None:
+    plan = plan_for(tmp_path, borrowers=(person(initial=" AB ", kind=kind), company()))
+
+    reported = [(str(i.rule), i.field, i.value) for i in result(plan, BORROWERS).issues]
+    assert reported == [type_failure, ("SV-08", "MIDDLE_INIT", " AB ")]
+
+
+@pytest.mark.parametrize("kind", ["I", "X"])
+def test_padded_single_letter_initial_is_valid(tmp_path: Path, kind: str) -> None:
+    plan = plan_for(tmp_path, borrowers=(person(initial=" r ", kind=kind), company()))
+
+    assert "SV-08" not in rules(plan, BORROWERS)
+    if kind == "I":
+        assert plan.borrowers_to_load[0].legal_name == "Jane R. Doe"
+
+
 def test_valid_customer_on_rejected_unit_still_loads_with_warning(tmp_path: Path) -> None:
     plan = plan_for(tmp_path, applications=(application(amount="0.00"),))
 
